@@ -95,6 +95,7 @@ public enum ValidationCode
 /// </summary>
 public sealed class ValidationCodeConverter : JsonConverter<ValidationCode>
 {
+    /// <summary>Deserializes the wire string into a <see cref="ValidationCode"/>.</summary>
     public override ValidationCode Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         var value = reader.GetString();
@@ -128,6 +129,7 @@ public sealed class ValidationCodeConverter : JsonConverter<ValidationCode>
         };
     }
 
+    /// <summary>Serializes the <see cref="ValidationCode"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, ValidationCode value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value switch

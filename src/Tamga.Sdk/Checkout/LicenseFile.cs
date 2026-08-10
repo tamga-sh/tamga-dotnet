@@ -14,12 +14,21 @@ namespace Tamga.Sdk.Checkout;
 /// </summary>
 public sealed record LicenseFileCertificate
 {
+    /// <summary>
+    /// Base64-encoded license payload — either AES-256-GCM ciphertext (encrypted license) or plain
+    /// JSON (unencrypted), depending on <see cref="Alg"/>.
+    /// </summary>
     [JsonPropertyName("enc")]
     public required string Enc { get; init; }
 
+    /// <summary>
+    /// Base64-encoded Ed25519 signature, computed over the ASCII/UTF-8 bytes of <see cref="Enc"/>'s
+    /// base64 string itself, not the decoded payload bytes.
+    /// </summary>
     [JsonPropertyName("sig")]
     public required string Sig { get; init; }
 
+    /// <summary>Algorithm identifier — exactly <c>"base64+ed25519"</c> (plain) or <c>"aes-256-gcm+ed25519"</c> (encrypted).</summary>
     [JsonPropertyName("alg")]
     public required string Alg { get; init; }
 }

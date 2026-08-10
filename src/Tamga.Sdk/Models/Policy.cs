@@ -39,6 +39,7 @@ public enum LicenseScheme
 /// </summary>
 public sealed class LicenseSchemeConverter : JsonConverter<LicenseScheme>
 {
+    /// <summary>Deserializes the wire string into a <see cref="LicenseScheme"/>.</summary>
     public override LicenseScheme Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         var value = reader.GetString();
@@ -54,6 +55,7 @@ public sealed class LicenseSchemeConverter : JsonConverter<LicenseScheme>
         };
     }
 
+    /// <summary>Serializes the <see cref="LicenseScheme"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, LicenseScheme value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value switch
@@ -108,6 +110,7 @@ public enum OverageStrategy
 /// </remarks>
 public sealed class OverageStrategyConverter : JsonConverter<OverageStrategy>
 {
+    /// <summary>Deserializes the wire string into an <see cref="OverageStrategy"/>.</summary>
     public override OverageStrategy Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         var value = reader.GetString();
@@ -124,6 +127,7 @@ public sealed class OverageStrategyConverter : JsonConverter<OverageStrategy>
         };
     }
 
+    /// <summary>Serializes the <see cref="OverageStrategy"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, OverageStrategy value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value switch
@@ -152,6 +156,7 @@ public enum HeartbeatCullStrategy
 /// <summary>Converts <see cref="HeartbeatCullStrategy"/> to/from its wire string.</summary>
 public sealed class HeartbeatCullStrategyConverter : JsonConverter<HeartbeatCullStrategy>
 {
+    /// <summary>Deserializes the wire string into a <see cref="HeartbeatCullStrategy"/>.</summary>
     public override HeartbeatCullStrategy Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         return reader.GetString() switch
@@ -161,6 +166,7 @@ public sealed class HeartbeatCullStrategyConverter : JsonConverter<HeartbeatCull
         };
     }
 
+    /// <summary>Serializes the <see cref="HeartbeatCullStrategy"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, HeartbeatCullStrategy value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value == HeartbeatCullStrategy.KeepDead ? "KEEP_DEAD" : "DEACTIVATE_DEAD");
@@ -209,6 +215,7 @@ public enum HeartbeatResurrectionStrategy
 /// </remarks>
 public sealed class HeartbeatResurrectionStrategyConverter : JsonConverter<HeartbeatResurrectionStrategy>
 {
+    /// <summary>Deserializes the wire string into a <see cref="HeartbeatResurrectionStrategy"/>.</summary>
     public override HeartbeatResurrectionStrategy Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         return reader.GetString() switch
@@ -225,6 +232,7 @@ public sealed class HeartbeatResurrectionStrategyConverter : JsonConverter<Heart
         };
     }
 
+    /// <summary>Serializes the <see cref="HeartbeatResurrectionStrategy"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, HeartbeatResurrectionStrategy value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value switch
@@ -263,6 +271,7 @@ public enum CheckInInterval
 /// <summary>Converts <see cref="CheckInInterval"/> to/from its lowercase wire string.</summary>
 public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
 {
+    /// <summary>Deserializes the lowercase wire string into a <see cref="CheckInInterval"/>.</summary>
     public override CheckInInterval Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
     {
         return reader.GetString() switch
@@ -274,6 +283,7 @@ public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
         };
     }
 
+    /// <summary>Serializes the <see cref="CheckInInterval"/> as its lowercase wire string.</summary>
     public override void Write(Utf8JsonWriter writer, CheckInInterval value, JsonSerializerOptions options)
     {
         writer.WriteStringValue(value switch
@@ -295,15 +305,28 @@ public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
 /// </summary>
 public static class PolicyStrategies
 {
+    /// <summary>Wire value for <see cref="Policy.ExpirationStrategy"/>: access is restricted once the license expires.</summary>
     public const string RestrictAccess = "RESTRICT_ACCESS";
+
+    /// <summary>Wire value for <see cref="Policy.ExpirationStrategy"/>: access is maintained past expiry.</summary>
     public const string MaintainAccess = "MAINTAIN_ACCESS";
+
+    /// <summary>Wire value for <see cref="Policy.ExpirationStrategy"/>: access is always allowed, regardless of expiry.</summary>
     public const string AllowAccess = "ALLOW_ACCESS";
 
+    /// <summary>Wire value for <see cref="Policy.RenewalBasis"/>: renewal extends from the current expiry date.</summary>
     public const string FromExpiry = "FROM_EXPIRY";
+
+    /// <summary>Wire value for <see cref="Policy.RenewalBasis"/>: renewal extends from the current time.</summary>
     public const string FromNow = "FROM_NOW";
 
+    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: token-based authentication.</summary>
     public const string Token = "TOKEN";
+
+    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: license-key-based authentication.</summary>
     public const string License = "LICENSE";
+
+    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: both token and license-key authentication.</summary>
     public const string Mixed = "MIXED";
 }
 
@@ -316,18 +339,23 @@ public static class PolicyStrategies
 /// </summary>
 public sealed record Policy
 {
+    /// <summary>The policy's unique identifier.</summary>
     [JsonPropertyName("id")]
     public Guid Id { get; init; }
 
+    /// <summary>The maximum number of machines allowed under this policy.</summary>
     [JsonPropertyName("max_machines")]
     public int? MaxMachines { get; init; }
 
+    /// <summary>The maximum number of CPU cores allowed under this policy.</summary>
     [JsonPropertyName("max_cores")]
     public int? MaxCores { get; init; }
 
+    /// <summary>The maximum number of processes allowed under this policy.</summary>
     [JsonPropertyName("max_processes")]
     public int? MaxProcesses { get; init; }
 
+    /// <summary>The maximum number of uses allowed under this policy.</summary>
     [JsonPropertyName("max_uses")]
     public int? MaxUses { get; init; }
 
@@ -339,13 +367,16 @@ public sealed record Policy
     [JsonPropertyName("max_disk")]
     public int? MaxDisk { get; init; }
 
+    /// <summary>Whether periodic check-in is required to keep a license valid.</summary>
     [JsonPropertyName("require_check_in")]
     public bool RequireCheckIn { get; init; }
 
+    /// <summary>The required check-in interval, if <see cref="RequireCheckIn"/> is set.</summary>
     [JsonPropertyName("check_in_interval")]
     [JsonConverter(typeof(CheckInIntervalConverter))]
     public CheckInInterval? CheckInInterval { get; init; }
 
+    /// <summary>Whether machines must send periodic heartbeats to stay alive.</summary>
     [JsonPropertyName("require_heartbeat")]
     public bool RequireHeartbeat { get; init; }
 
@@ -357,14 +388,17 @@ public sealed record Policy
     [JsonPropertyName("heartbeat_duration")]
     public int? HeartbeatDuration { get; init; }
 
+    /// <summary>How overage beyond the policy's <c>max_*</c> limits is tolerated.</summary>
     [JsonPropertyName("overage_strategy")]
     [JsonConverter(typeof(OverageStrategyConverter))]
     public OverageStrategy OverageStrategy { get; init; }
 
+    /// <summary>What happens to a machine row once it's been dead for longer than its resurrection grace window.</summary>
     [JsonPropertyName("heartbeat_cull_strategy")]
     [JsonConverter(typeof(HeartbeatCullStrategyConverter))]
     public HeartbeatCullStrategy HeartbeatCullStrategy { get; init; }
 
+    /// <summary>The grace window after a machine is marked dead during which a new heartbeat revives it.</summary>
     [JsonPropertyName("heartbeat_resurrection_strategy")]
     [JsonConverter(typeof(HeartbeatResurrectionStrategyConverter))]
     public HeartbeatResurrectionStrategy HeartbeatResurrectionStrategy { get; init; }
@@ -381,10 +415,12 @@ public sealed record Policy
     [JsonPropertyName("authentication_strategy")]
     public string? AuthenticationStrategy { get; init; }
 
+    /// <summary>The key/checkout signing algorithm configured on this policy.</summary>
     [JsonPropertyName("scheme")]
     [JsonConverter(typeof(LicenseSchemeConverter))]
     public LicenseScheme Scheme { get; init; }
 
+    /// <summary>Arbitrary key/value metadata attached to the policy.</summary>
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; init; }
 }

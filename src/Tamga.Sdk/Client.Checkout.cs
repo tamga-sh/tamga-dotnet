@@ -6,9 +6,11 @@ namespace Tamga.Sdk;
 /// <summary>Request body shared by both license and machine checkout: <c>{ "meta": { "encrypt": bool, "ttl": int } }</c>.</summary>
 public sealed record CheckOutRequestMeta
 {
+    /// <summary>Whether the checked-out file's key material should be encrypted.</summary>
     [JsonPropertyName("encrypt")]
     public bool Encrypt { get; init; }
 
+    /// <summary>The requested time-to-live for the checked-out file, in seconds.</summary>
     [JsonPropertyName("ttl")]
     public int? Ttl { get; init; }
 }
@@ -16,6 +18,7 @@ public sealed record CheckOutRequestMeta
 /// <summary>Request body for <c>POST .../actions/check-out</c> (both license and machine).</summary>
 public sealed record CheckOutRequest
 {
+    /// <summary>The check-out request's <c>meta</c> options.</summary>
     [JsonPropertyName("meta")]
     public required CheckOutRequestMeta Meta { get; init; }
 }
@@ -30,6 +33,7 @@ public sealed record CheckoutFileAttributes
     [JsonPropertyName("certificate")]
     public string Certificate { get; init; } = "";
 
+    /// <summary>The signing/encryption algorithm used to produce the certificate.</summary>
     [JsonPropertyName("algorithm")]
     public string Algorithm { get; init; } = "";
 
@@ -45,9 +49,11 @@ public sealed record CheckoutFileAttributes
     [JsonPropertyName("ttl")]
     public int? Ttl { get; init; }
 
+    /// <summary>When the checked-out file expires.</summary>
     [JsonPropertyName("expiry")]
     public DateTimeOffset? Expiry { get; init; }
 
+    /// <summary>When the checked-out file was issued.</summary>
     [JsonPropertyName("issued")]
     public DateTimeOffset? Issued { get; init; }
 }

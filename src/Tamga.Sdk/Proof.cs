@@ -13,6 +13,7 @@ namespace Tamga.Sdk;
 /// </summary>
 public sealed record GenerateOfflineProofRequestMeta
 {
+    /// <summary>The caller-supplied dataset to embed in the offline proof's signed payload.</summary>
     [JsonPropertyName("dataset")]
     public JsonObject Dataset { get; init; } = new();
 }
@@ -20,6 +21,7 @@ public sealed record GenerateOfflineProofRequestMeta
 /// <summary>Request body for <c>POST /machines/{id}/actions/generate-offline-proof</c>.</summary>
 public sealed record GenerateOfflineProofRequest
 {
+    /// <summary>The request's <c>meta</c> object, containing the dataset to sign.</summary>
     [JsonPropertyName("meta")]
     public required GenerateOfflineProofRequestMeta Meta { get; init; }
 }

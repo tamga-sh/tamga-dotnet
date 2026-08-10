@@ -77,8 +77,15 @@ public abstract record AuthTransport
 /// <summary>Alphanumeric + <c>.</c>/<c>-</c> sanitization for the <c>Tamga-Version</c> header, max 32 chars.</summary>
 public static class TamgaVersionSanitizer
 {
+    /// <summary>The maximum length, in characters, of the sanitized version string.</summary>
     public const int MaxLength = 32;
 
+    /// <summary>
+    /// Strips <paramref name="version"/> down to ASCII alphanumerics and <c>.</c>/<c>-</c>, truncating
+    /// to <see cref="MaxLength"/> characters, for safe use as the <c>Tamga-Version</c> header value.
+    /// </summary>
+    /// <param name="version">The raw version string to sanitize.</param>
+    /// <returns>The sanitized, truncated version string.</returns>
     public static string Sanitize(string version)
     {
         var builder = new StringBuilder(Math.Min(version.Length, MaxLength));
@@ -102,9 +109,11 @@ public static class TamgaVersionSanitizer
 /// <summary>A JSON:API resource identifier: <c>{ "type": "...", "id": "..." }</c>.</summary>
 public sealed record JsonApiResourceIdentifier
 {
+    /// <summary>The resource type discriminator.</summary>
     [JsonPropertyName("type")]
     public string Type { get; init; } = "";
 
+    /// <summary>The resource's unique identifier.</summary>
     [JsonPropertyName("id")]
     public Guid Id { get; init; }
 }
@@ -112,6 +121,7 @@ public sealed record JsonApiResourceIdentifier
 /// <summary>A single JSON:API relationship: <c>{ "data": { "type": "...", "id": "..." } }</c>.</summary>
 public sealed record JsonApiRelationship
 {
+    /// <summary>The related resource's linkage, or <see langword="null"/> if the relationship is empty.</summary>
     [JsonPropertyName("data")]
     public JsonApiResourceIdentifier? Data { get; init; }
 }
@@ -119,15 +129,19 @@ public sealed record JsonApiRelationship
 /// <summary>A JSON:API resource object: <c>{ type, id, attributes, relationships }</c>.</summary>
 public sealed record JsonApiResource<TAttributes>
 {
+    /// <summary>The resource type discriminator.</summary>
     [JsonPropertyName("type")]
     public string Type { get; init; } = "";
 
+    /// <summary>The resource's unique identifier.</summary>
     [JsonPropertyName("id")]
     public Guid Id { get; init; }
 
+    /// <summary>The resource's attributes payload.</summary>
     [JsonPropertyName("attributes")]
     public TAttributes? Attributes { get; init; }
 
+    /// <summary>The resource's related-resource linkages, keyed by relationship name.</summary>
     [JsonPropertyName("relationships")]
     public Dictionary<string, JsonApiRelationship>? Relationships { get; init; }
 }
@@ -139,12 +153,15 @@ public sealed record JsonApiResource<TAttributes>
 /// </summary>
 public sealed record JsonApiDocument<TAttributes>
 {
+    /// <summary>The primary resource returned by the request.</summary>
     [JsonPropertyName("data")]
     public JsonApiResource<TAttributes>? Data { get; init; }
 
+    /// <summary>Non-standard meta information accompanying the response.</summary>
     [JsonPropertyName("meta")]
     public JsonElement? Meta { get; init; }
 
+    /// <summary>The errors returned instead of <see cref="Data"/> when the request failed.</summary>
     [JsonPropertyName("errors")]
     public IReadOnlyList<TamgaApiError>? Errors { get; init; }
 
@@ -156,12 +173,15 @@ public sealed record JsonApiDocument<TAttributes>
 /// <summary>The <c>data</c> object of a JSON:API create request: <c>{ type, attributes, relationships }</c>.</summary>
 public sealed record JsonApiCreateRequestData<TAttributes>
 {
+    /// <summary>The resource type discriminator.</summary>
     [JsonPropertyName("type")]
     public required string Type { get; init; }
 
+    /// <summary>The attributes to create the resource with.</summary>
     [JsonPropertyName("attributes")]
     public required TAttributes Attributes { get; init; }
 
+    /// <summary>The related-resource linkages to create the resource with, keyed by relationship name.</summary>
     [JsonPropertyName("relationships")]
     public Dictionary<string, JsonApiRelationship>? Relationships { get; init; }
 }
@@ -169,6 +189,7 @@ public sealed record JsonApiCreateRequestData<TAttributes>
 /// <summary>A JSON:API create request body: <c>{ "data": {...} }</c>.</summary>
 public sealed record JsonApiCreateRequest<TAttributes>
 {
+    /// <summary>The resource data to create.</summary>
     [JsonPropertyName("data")]
     public required JsonApiCreateRequestData<TAttributes> Data { get; init; }
 }
@@ -176,6 +197,7 @@ public sealed record JsonApiCreateRequest<TAttributes>
 /// <summary>The <c>links</c> object on a keyset-paginated JSON:API list response.</summary>
 public sealed record JsonApiLinks
 {
+    /// <summary>The URL of the next page, or <see langword="null"/> if this is the last page.</summary>
     [JsonPropertyName("next")]
     public string? Next { get; init; }
 }
@@ -188,15 +210,19 @@ public sealed record JsonApiLinks
 /// </summary>
 public sealed record JsonApiListDocument<TAttributes>
 {
+    /// <summary>The page of resources returned by the request.</summary>
     [JsonPropertyName("data")]
     public IReadOnlyList<JsonApiResource<TAttributes>> Data { get; init; } = Array.Empty<JsonApiResource<TAttributes>>();
 
+    /// <summary>Non-standard meta information accompanying the response.</summary>
     [JsonPropertyName("meta")]
     public JsonElement? Meta { get; init; }
 
+    /// <summary>Pagination/navigation links for the list response.</summary>
     [JsonPropertyName("links")]
     public JsonApiLinks? Links { get; init; }
 
+    /// <summary>The errors returned instead of <see cref="Data"/> when the request failed.</summary>
     [JsonPropertyName("errors")]
     public IReadOnlyList<TamgaApiError>? Errors { get; init; }
 }
@@ -207,6 +233,7 @@ public sealed record JsonApiListDocument<TAttributes>
 /// </summary>
 public static class TamgaJsonOptions
 {
+    /// <summary>The shared <see cref="JsonSerializerOptions"/> instance used for (de)serializing Tamga API payloads.</summary>
     public static readonly JsonSerializerOptions Default = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -224,6 +251,12 @@ public sealed class TamgaTransport
     private readonly HttpClient _httpClient;
     private readonly TamgaClientOptions _options;
 
+    /// <summary>
+    /// Creates a transport that sends requests through <paramref name="httpClient"/>, scoped to the
+    /// account and configured with the auth transport in <paramref name="options"/>.
+    /// </summary>
+    /// <param name="httpClient">The <see cref="HttpClient"/> used to send every request.</param>
+    /// <param name="options">The account, base URL, auth, and other request configuration.</param>
     public TamgaTransport(HttpClient httpClient, TamgaClientOptions options)
     {
         _httpClient = httpClient;

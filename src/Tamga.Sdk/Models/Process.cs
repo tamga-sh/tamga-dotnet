@@ -15,9 +15,11 @@ namespace Tamga.Sdk.Models;
 /// </remarks>
 public sealed record Process
 {
+    /// <summary>The process's unique ID.</summary>
     [JsonPropertyName("id")]
     public Guid Id { get; init; }
 
+    /// <summary>The ID of the machine this process belongs to.</summary>
     [JsonPropertyName("machine_id")]
     public Guid MachineId { get; init; }
 
@@ -29,12 +31,15 @@ public sealed record Process
     [JsonPropertyName("pid")]
     public string Pid { get; init; } = "";
 
+    /// <summary>Arbitrary caller-supplied metadata attached to the process.</summary>
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; init; }
 
+    /// <summary>When the process was created.</summary>
     [JsonPropertyName("created")]
     public DateTimeOffset? Created { get; init; }
 
+    /// <summary>When the process was last updated.</summary>
     [JsonPropertyName("updated")]
     public DateTimeOffset? Updated { get; init; }
 }
@@ -47,12 +52,15 @@ public sealed record Process
 /// </summary>
 public sealed record CreateProcessRequest
 {
+    /// <summary>The ID of the machine this process belongs to.</summary>
     [JsonPropertyName("machine_id")]
     public required Guid MachineId { get; init; }
 
+    /// <summary>The process ID to report, as a string — see <see cref="Process.Pid"/>'s remarks.</summary>
     [JsonPropertyName("pid")]
     public required string Pid { get; init; }
 
+    /// <summary>Arbitrary caller-supplied metadata to attach to the process.</summary>
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; init; }
 }

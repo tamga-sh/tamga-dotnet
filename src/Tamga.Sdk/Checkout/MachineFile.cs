@@ -13,12 +13,19 @@ namespace Tamga.Sdk.Checkout;
 /// </summary>
 public sealed record MachineFileCertificate
 {
+    /// <summary>The payload: base64-encoded AES-256-GCM ciphertext (encrypted files) or plain base64-encoded JSON (unencrypted files).</summary>
     [JsonPropertyName("enc")]
     public required string Enc { get; init; }
 
+    /// <summary>The signature over <see cref="Enc"/>'s base64 string bytes, base64-encoded.</summary>
     [JsonPropertyName("sig")]
     public required string Sig { get; init; }
 
+    /// <summary>
+    /// The algorithm identifier reported by the server (e.g. contains <c>"aes-256-gcm"</c> and/or a
+    /// signature-scheme suffix like <c>"rsa-sha256"</c>). NEVER used to select the verifier — see
+    /// <see cref="MachineFile"/>'s type-level remarks.
+    /// </summary>
     [JsonPropertyName("alg")]
     public required string Alg { get; init; }
 }
@@ -26,6 +33,7 @@ public sealed record MachineFileCertificate
 /// <summary>The <c>{"data": &lt;MachineResource&gt;}</c> payload embedded in a plain (unencrypted) <c>.machine</c> file.</summary>
 public sealed record MachineFilePayload
 {
+    /// <summary>The machine resource embedded in the file's payload.</summary>
     [JsonPropertyName("data")]
     public required JsonApiResource<MachineAttributes> Data { get; init; }
 }

@@ -134,6 +134,10 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// <summary>Raised when a ping observes <see cref="HeartbeatStatus.Dead"/> — see type-level remarks.</summary>
     public event Action<Machine>? Dead;
 
+    /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
+    /// <param name="client">The client used to send each heartbeat ping.</param>
+    /// <param name="machineId">The ID of the machine to ping.</param>
+    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
     public HeartbeatScheduler(TamgaClient client, Guid machineId, TimeSpan? interval = null)
     {
         _client = client;

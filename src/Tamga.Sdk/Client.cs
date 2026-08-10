@@ -41,6 +41,7 @@ public sealed partial class TamgaClient : IDisposable
         _transport = new TamgaTransport(httpClient, options);
     }
 
+    /// <summary>Disposes the internal <see cref="HttpClient"/> if this instance created and owns it; a no-op for externally-injected clients.</summary>
     public void Dispose()
     {
         if (_ownsHttpClient)

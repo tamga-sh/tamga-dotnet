@@ -5,6 +5,7 @@ namespace Tamga.Sdk;
 /// <summary>The <c>source</c> object on a JSON:API error, pointing at the offending request field.</summary>
 public sealed record TamgaApiErrorSource
 {
+    /// <summary>JSON Pointer to the offending request field, e.g. <c>/data/attributes/key</c>.</summary>
     [JsonPropertyName("pointer")]
     public string? Pointer { get; init; }
 }
@@ -16,21 +17,27 @@ public sealed record TamgaApiErrorSource
 /// </summary>
 public sealed record TamgaApiError
 {
+    /// <summary>Server-assigned identifier for this error occurrence.</summary>
     [JsonPropertyName("id")]
     public string? Id { get; init; }
 
+    /// <summary>The HTTP status code associated with this error.</summary>
     [JsonPropertyName("status")]
     public ushort Status { get; init; }
 
+    /// <summary>Stable machine-readable error code — dispatch on this, not <see cref="Detail"/>.</summary>
     [JsonPropertyName("code")]
     public string Code { get; init; } = "";
 
+    /// <summary>Short, human-readable summary of the error type.</summary>
     [JsonPropertyName("title")]
     public string? Title { get; init; }
 
+    /// <summary>Human-readable explanation specific to this error occurrence.</summary>
     [JsonPropertyName("detail")]
     public string Detail { get; init; } = "";
 
+    /// <summary>The request field that caused this error, if applicable.</summary>
     [JsonPropertyName("source")]
     public TamgaApiErrorSource? Source { get; init; }
 
@@ -42,6 +49,7 @@ public sealed record TamgaApiError
 /// <summary>The full JSON:API error envelope: <c>{"errors": [...]}</c>.</summary>
 public sealed record TamgaApiErrorEnvelope
 {
+    /// <summary>The list of errors returned by the API.</summary>
     [JsonPropertyName("errors")]
     public IReadOnlyList<TamgaApiError> Errors { get; init; } = Array.Empty<TamgaApiError>();
 }
@@ -54,8 +62,10 @@ public sealed record TamgaApiErrorEnvelope
 /// </summary>
 public class TamgaApiException : Exception
 {
+    /// <summary>The parsed API error that caused this exception.</summary>
     public TamgaApiError Error { get; }
 
+    /// <summary>Constructs from a parsed API error.</summary>
     public TamgaApiException(TamgaApiError error)
         : base($"Tamga API error {error.Code} ({error.Status}): {error.Detail}")
     {
@@ -70,6 +80,7 @@ public class TamgaApiException : Exception
 /// </summary>
 public sealed class CheckInNotRequiredException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public CheckInNotRequiredException(TamgaApiError error) : base(error) { }
 }
 
@@ -80,18 +91,21 @@ public sealed class CheckInNotRequiredException : TamgaApiException
 /// </summary>
 public sealed class FingerprintTakenException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public FingerprintTakenException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>409 PID_TAKEN</c> — a process PID is already in use on the target machine.</summary>
 public sealed class PidTakenException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public PidTakenException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>409 KEY_TAKEN</c> — the requested license key is already in use.</summary>
 public sealed class KeyTakenException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public KeyTakenException(TamgaApiError error) : base(error) { }
 }
 
@@ -102,18 +116,21 @@ public sealed class KeyTakenException : TamgaApiException
 /// </summary>
 public sealed class TtlInvalidException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public TtlInvalidException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>422 LICENSE_NOT_ENCRYPTED</c> — <c>encrypt=true</c> was requested but the license has no <c>key</c> set.</summary>
 public sealed class LicenseNotEncryptedException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public LicenseNotEncryptedException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>422 LICENSE_KEY_MISSING</c> — an operation required a license key that is not set.</summary>
 public sealed class LicenseKeyMissingException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public LicenseKeyMissingException(TamgaApiError error) : base(error) { }
 }
 
@@ -125,6 +142,7 @@ public sealed class LicenseKeyMissingException : TamgaApiException
 /// </summary>
 public sealed class SchemeNotSupportedException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public SchemeNotSupportedException(TamgaApiError error) : base(error) { }
 
     /// <summary>Constructs a purely client-side instance (no server round-trip occurred) for the local machine-file-verify rejection path.</summary>
@@ -137,6 +155,7 @@ public sealed class SchemeNotSupportedException : TamgaApiException
 /// <summary><c>422 DATASET_INVALID</c> — the <c>dataset</c> object supplied to offline-proof generation was rejected.</summary>
 public sealed class DatasetInvalidException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public DatasetInvalidException(TamgaApiError error) : base(error) { }
 }
 
@@ -148,6 +167,7 @@ public sealed class DatasetInvalidException : TamgaApiException
 /// </summary>
 public sealed class UnsupportedAlgorithmException : Exception
 {
+    /// <summary>Constructs with the given error message.</summary>
     public UnsupportedAlgorithmException(string message) : base(message) { }
 }
 
@@ -157,30 +177,35 @@ public sealed class UnsupportedAlgorithmException : Exception
 /// </summary>
 public sealed class OfflineFileFormatException : Exception
 {
+    /// <summary>Constructs with the given error message.</summary>
     public OfflineFileFormatException(string message) : base(message) { }
 }
 
 /// <summary>Thrown when Ed25519/RSA/ECDSA signature verification fails on a <c>.lic</c>/<c>.machine</c> file or offline proof — always fails closed, never silently accepts.</summary>
 public sealed class SignatureVerificationException : Exception
 {
+    /// <summary>Constructs with the given error message.</summary>
     public SignatureVerificationException(string message) : base(message) { }
 }
 
 /// <summary><c>404 NOT_FOUND</c>.</summary>
 public sealed class TamgaNotFoundException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public TamgaNotFoundException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>401 UNAUTHORIZED</c>.</summary>
 public sealed class TamgaUnauthorizedException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public TamgaUnauthorizedException(TamgaApiError error) : base(error) { }
 }
 
 /// <summary><c>403 FORBIDDEN</c>.</summary>
 public sealed class TamgaForbiddenException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public TamgaForbiddenException(TamgaApiError error) : base(error) { }
 }
 
@@ -190,6 +215,7 @@ public sealed class TamgaForbiddenException : TamgaApiException
 /// </summary>
 public sealed class TamgaInternalServerErrorException : TamgaApiException
 {
+    /// <summary>Constructs from a parsed API error.</summary>
     public TamgaInternalServerErrorException(TamgaApiError error) : base(error) { }
 }
 
@@ -204,6 +230,9 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 /// </remarks>
 public static class TamgaErrorMapper
 {
+    /// <summary>Maps a parsed API error to the most specific typed exception matching its <see cref="TamgaApiError.Code"/>.</summary>
+    /// <param name="error">The parsed API error to map.</param>
+    /// <returns>The typed exception for <paramref name="error"/>'s <c>code</c>, or a base <see cref="TamgaApiException"/> if the code is unmodeled.</returns>
     public static TamgaApiException ToException(TamgaApiError error) => error.Code switch
     {
         "CHECK_IN_NOT_REQUIRED" => new CheckInNotRequiredException(error),

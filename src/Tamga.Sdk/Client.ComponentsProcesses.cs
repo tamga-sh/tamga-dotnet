@@ -145,6 +145,10 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     /// <summary>Raised when a ping throws — the loop continues on the next tick rather than terminating.</summary>
     public event Action<Exception>? Faulted;
 
+    /// <summary>Creates a scheduler for a single process. Call <see cref="Start"/> to begin pinging.</summary>
+    /// <param name="client">The client used to send each heartbeat ping.</param>
+    /// <param name="processId">The ID of the process to ping.</param>
+    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
     public ProcessHeartbeatScheduler(TamgaClient client, Guid processId, TimeSpan? interval = null)
     {
         _client = client;
@@ -181,6 +185,7 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
         }
     }
 
+    /// <summary>Stops the background heartbeat loop and releases resources.</summary>
     public async ValueTask DisposeAsync()
     {
         _cts.Cancel();
