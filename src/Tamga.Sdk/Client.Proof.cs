@@ -19,14 +19,31 @@ public sealed partial class TamgaClient
     /// <see cref="MachineProof"/>. <paramref name="dataset"/> defaults to an empty object.
     /// </summary>
     /// <exception cref="DatasetInvalidException"><c>422 DATASET_INVALID</c> — the server rejected <paramref name="dataset"/>.</exception>
+    /// <exception cref="ArgumentException"><paramref name="dataset"/> is a non-null <see cref="JsonNode"/> that isn't a JSON object (e.g. an array or a scalar value) — the wire contract is <c>{ "meta": { "dataset": {...} } }</c>, an object.</exception>
     public async Task<MachineProof> GenerateOfflineProofAsync(
         Guid machineId,
         JsonNode? dataset = null,
         CancellationToken cancellationToken = default)
     {
+        JsonObject datasetObject;
+        switch (dataset)
+        {
+            case null:
+                datasetObject = new JsonObject();
+                break;
+            case JsonObject obj:
+                datasetObject = obj;
+                break;
+            default:
+                // CRITICAL (found in code review): silently substituting an empty object here
+                // for a non-object dataset would send `{}` instead of what the caller asked for,
+                // with no error — fail fast instead.
+                throw new ArgumentException($"dataset must be a JSON object, got {dataset.GetType().Name}.", nameof(dataset));
+        }
+
         var body = new GenerateOfflineProofRequest
         {
-            Meta = new GenerateOfflineProofRequestMeta { Dataset = dataset as JsonObject ?? new JsonObject() },
+            Meta = new GenerateOfflineProofRequestMeta { Dataset = datasetObject },
         };
 
         var doc = await _transport.SendJsonApiAsync<MachineAttributes>(

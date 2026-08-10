@@ -124,14 +124,15 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     private readonly PeriodicTimer _timer;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
+    private bool _disposed;
 
-    /// <summary>Raised after each successful ping with the updated machine resource.</summary>
+    /// <summary>Raised after each successful ping with the updated machine resource. A throwing handler is caught and rerouted to <see cref="Faulted"/> rather than killing the ping loop.</summary>
     public event Action<Machine>? Pinged;
 
-    /// <summary>Raised when a ping throws — the loop continues on the next tick rather than terminating.</summary>
+    /// <summary>Raised when a ping throws, or when a <see cref="Pinged"/>/<see cref="Dead"/> handler itself throws — the loop continues on the next tick rather than terminating.</summary>
     public event Action<Exception>? Faulted;
 
-    /// <summary>Raised when a ping observes <see cref="HeartbeatStatus.Dead"/> — see type-level remarks.</summary>
+    /// <summary>Raised when a ping observes <see cref="HeartbeatStatus.Dead"/> — see type-level remarks. A throwing handler is caught and rerouted to <see cref="Faulted"/> rather than killing the ping loop.</summary>
     public event Action<Machine>? Dead;
 
     /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
@@ -157,18 +158,23 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
         {
             while (await _timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
+                Machine machine;
                 try
                 {
-                    var machine = await _client.PingHeartbeatAsync(_machineId, cancellationToken).ConfigureAwait(false);
-                    Pinged?.Invoke(machine);
-                    if (machine.HeartbeatStatus == HeartbeatStatus.Dead)
-                    {
-                        Dead?.Invoke(machine);
-                    }
+                    machine = await _client.PingHeartbeatAsync(_machineId, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Faulted?.Invoke(ex);
+                    InvokeFaulted(ex);
+                    continue;
+                }
+
+                // A throwing Pinged/Dead handler must not kill the loop — reroute to Faulted
+                // instead, same as a failed ping itself.
+                InvokeSafely(Pinged, machine);
+                if (machine.HeartbeatStatus == HeartbeatStatus.Dead)
+                {
+                    InvokeSafely(Dead, machine);
                 }
             }
         }
@@ -178,9 +184,40 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
         }
     }
 
-    /// <summary>Stops the ping loop and releases the underlying timer.</summary>
+    private void InvokeSafely(Action<Machine>? handler, Machine machine)
+    {
+        try
+        {
+            handler?.Invoke(machine);
+        }
+        catch (Exception ex)
+        {
+            InvokeFaulted(ex);
+        }
+    }
+
+    private void InvokeFaulted(Exception ex)
+    {
+        try
+        {
+            Faulted?.Invoke(ex);
+        }
+        catch
+        {
+            // A throwing Faulted handler has nowhere left to report to — swallow rather than
+            // crash the loop that exists specifically to keep reporting failures.
+        }
+    }
+
+    /// <summary>Stops the ping loop and releases the underlying timer. Safe to call more than once.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
         _cts.Cancel();
         if (_loop is not null)
         {

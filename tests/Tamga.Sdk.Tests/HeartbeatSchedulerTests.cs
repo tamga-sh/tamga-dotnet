@@ -69,6 +69,75 @@ public class HeartbeatSchedulerTests
     }
 
     [Fact]
+    public async Task HeartbeatScheduler_DisposeAsync_IsIdempotent()
+    {
+        // Code-review regression: a second DisposeAsync() call must not throw
+        // ObjectDisposedException from the underlying CancellationTokenSource.
+        var (client, _) = MakeClient();
+        var scheduler = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMinutes(10));
+        scheduler.Start();
+
+        await scheduler.DisposeAsync();
+        var ex = await Record.ExceptionAsync(async () => await scheduler.DisposeAsync());
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public async Task HeartbeatScheduler_ThrowingPingedHandler_DoesNotKillLoop_ReroutesToFaulted()
+    {
+        // Code-review regression: a throwing event subscriber must not silently terminate the
+        // ping loop — it should be caught and rerouted to Faulted, and pinging must continue.
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        string ResourceJson() => new JsonObject
+        {
+            ["data"] = new JsonObject
+            {
+                ["type"] = "machines",
+                ["id"] = machineId.ToString(),
+                ["attributes"] = new JsonObject { ["fingerprint"] = "fp", ["heartbeat_status"] = "ALIVE" },
+            },
+        }.ToJsonString();
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
+
+        var faultedSignal = new TaskCompletionSource();
+        var secondPingSignal = new TaskCompletionSource();
+        var pingCount = 0;
+
+        await using var scheduler = new HeartbeatScheduler(client, machineId, TimeSpan.FromMilliseconds(10));
+        scheduler.Pinged += _ =>
+        {
+            pingCount++;
+            if (pingCount == 1)
+            {
+                throw new InvalidOperationException("boom from a consumer handler");
+            }
+
+            secondPingSignal.TrySetResult();
+        };
+        scheduler.Faulted += _ => faultedSignal.TrySetResult();
+        scheduler.Start();
+
+        await faultedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondPingSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(pingCount >= 2);
+    }
+
+    [Fact]
+    public async Task ProcessHeartbeatScheduler_DisposeAsync_IsIdempotent()
+    {
+        var (client, _) = MakeClient();
+        var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMinutes(10));
+        scheduler.Start();
+
+        await scheduler.DisposeAsync();
+        var ex = await Record.ExceptionAsync(async () => await scheduler.DisposeAsync());
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public async Task ProcessHeartbeatScheduler_PingsRepeatedly()
     {
         var (client, handler) = MakeClient();

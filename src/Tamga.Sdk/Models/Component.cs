@@ -27,7 +27,7 @@ public sealed record Component
 
     /// <summary>Arbitrary caller-supplied metadata attached to the component.</summary>
     [JsonPropertyName("metadata")]
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>When the component was created.</summary>
     [JsonPropertyName("created")]

@@ -422,5 +422,5 @@ public sealed record Policy
 
     /// <summary>Arbitrary key/value metadata attached to the policy.</summary>
     [JsonPropertyName("metadata")]
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 }

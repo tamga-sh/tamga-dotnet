@@ -33,7 +33,7 @@ public sealed record Process
 
     /// <summary>Arbitrary caller-supplied metadata attached to the process.</summary>
     [JsonPropertyName("metadata")]
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>When the process was created.</summary>
     [JsonPropertyName("created")]

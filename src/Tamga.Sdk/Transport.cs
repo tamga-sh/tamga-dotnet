@@ -59,7 +59,16 @@ public abstract record AuthTransport
     /// <summary><c>Authorization: License &lt;key&gt;</c> — primary transport for this embedded/client SDK.</summary>
     public sealed record License(string Key) : AuthTransport;
 
-    /// <summary><c>Cookie: Tamga-Session=&lt;uuid&gt;</c> + matching <c>Origin</c> header. Browser/portal-only; modeled for completeness, not the expected path for this SDK.</summary>
+    /// <summary>
+    /// <c>Cookie: Tamga-Session=&lt;uuid&gt;</c> + matching <c>Origin</c> header. Browser/portal-only; modeled for completeness, not the expected path for this SDK.
+    /// </summary>
+    /// <remarks>
+    /// This header is set manually (bypassing <see cref="System.Net.CookieContainer"/>). If the
+    /// supplied <see cref="HttpClient"/> was constructed with a handler that has
+    /// <c>UseCookies = true</c> (the BCL default), that handler may also manage a <c>Cookie</c>
+    /// header itself, which can conflict with or duplicate this one. Callers using this transport
+    /// should construct their <see cref="HttpClient"/>'s handler with <c>UseCookies = false</c>.
+    /// </remarks>
     public sealed record Cookie(string SessionId, string Origin) : AuthTransport;
 
     /// <summary><c>?token=&lt;token&gt;</c> query parameter fallback.</summary>

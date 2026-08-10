@@ -144,10 +144,6 @@ public sealed partial class TamgaClient : IDisposable
         return new ValidationResult { License = license, Meta = meta };
     }
 
-    private static License MapLicense(JsonApiDocument<LicenseAttributes> doc)
-    {
-        var resource = doc.Data
-            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "MISSING_DATA", Detail = "Response had no license resource." });
-        return License.FromResource(resource);
-    }
+    private static License MapLicense(JsonApiDocument<LicenseAttributes> doc) =>
+        License.FromResource(doc.Data ?? throw MissingDataError());
 }

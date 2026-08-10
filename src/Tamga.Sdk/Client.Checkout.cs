@@ -90,13 +90,7 @@ public sealed partial class TamgaClient
             jsonBody: new CheckOutRequest { Meta = new CheckOutRequestMeta { Encrypt = encrypt, Ttl = ttl } },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        var certificate = doc.Data?.Attributes?.Certificate;
-        if (string.IsNullOrEmpty(certificate))
-        {
-            throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "MISSING_CERTIFICATE", Detail = "Checkout response had no certificate." });
-        }
-
-        return LicenseFile.Parse(certificate);
+        return LicenseFile.Parse(RequireCertificate(doc));
     }
 
     // ---------------------------------------------------------------
@@ -127,12 +121,17 @@ public sealed partial class TamgaClient
             jsonBody: new CheckOutRequest { Meta = new CheckOutRequestMeta { Encrypt = encrypt, Ttl = ttl } },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        return MachineFile.Parse(RequireCertificate(doc));
+    }
+
+    private static string RequireCertificate(JsonApiDocument<CheckoutFileAttributes> doc)
+    {
         var certificate = doc.Data?.Attributes?.Certificate;
         if (string.IsNullOrEmpty(certificate))
         {
             throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "MISSING_CERTIFICATE", Detail = "Checkout response had no certificate." });
         }
 
-        return MachineFile.Parse(certificate);
+        return certificate;
     }
 }

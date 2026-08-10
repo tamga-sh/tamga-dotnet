@@ -157,7 +157,7 @@ public sealed record Machine
     public Guid? LicenseId { get; init; }
 
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>Flattens a raw JSON:API machine resource into a <see cref="Machine"/>. Shared by <see cref="TamgaClient"/> and <see cref="Checkout.MachineFile"/>.</summary>
     public static Machine FromResource(JsonApiResource<MachineAttributes> resource)

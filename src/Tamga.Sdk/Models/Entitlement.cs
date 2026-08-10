@@ -44,7 +44,7 @@ public sealed record Entitlement
     public string Code { get; init; } = "";
 
     /// <summary>Arbitrary key/value metadata attached to the entitlement.</summary>
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>When the entitlement was created.</summary>
     public DateTimeOffset? Created { get; init; }

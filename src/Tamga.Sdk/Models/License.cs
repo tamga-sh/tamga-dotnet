@@ -122,7 +122,7 @@ public sealed record License
     public Guid? EnvironmentId { get; init; }
 
     /// <summary>Arbitrary key/value metadata attached to the license.</summary>
-    public Dictionary<string, JsonElement>? Metadata { get; init; }
+    public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>
     /// Flattens a raw JSON:API license resource (<c>data.id</c> + <c>data.attributes</c> +

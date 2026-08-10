@@ -138,11 +138,12 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     private readonly PeriodicTimer _timer;
     private readonly CancellationTokenSource _cts = new();
     private Task? _loop;
+    private bool _disposed;
 
-    /// <summary>Raised after each successful ping with the updated process resource.</summary>
+    /// <summary>Raised after each successful ping with the updated process resource. A throwing handler is caught and rerouted to <see cref="Faulted"/> rather than killing the ping loop.</summary>
     public event Action<Process>? Pinged;
 
-    /// <summary>Raised when a ping throws — the loop continues on the next tick rather than terminating.</summary>
+    /// <summary>Raised when a ping throws, or when a <see cref="Pinged"/> handler itself throws — the loop continues on the next tick rather than terminating.</summary>
     public event Action<Exception>? Faulted;
 
     /// <summary>Creates a scheduler for a single process. Call <see cref="Start"/> to begin pinging.</summary>
@@ -168,14 +169,26 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
         {
             while (await _timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
+                Process process;
                 try
                 {
-                    var process = await _client.PingProcessAsync(_processId, cancellationToken).ConfigureAwait(false);
-                    Pinged?.Invoke(process);
+                    process = await _client.PingProcessAsync(_processId, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
-                    Faulted?.Invoke(ex);
+                    InvokeFaulted(ex);
+                    continue;
+                }
+
+                // A throwing Pinged handler must not kill the loop — reroute to Faulted instead,
+                // same as a failed ping itself.
+                try
+                {
+                    Pinged?.Invoke(process);
+                }
+                catch (Exception ex)
+                {
+                    InvokeFaulted(ex);
                 }
             }
         }
@@ -185,9 +198,28 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
         }
     }
 
-    /// <summary>Stops the background heartbeat loop and releases resources.</summary>
+    private void InvokeFaulted(Exception ex)
+    {
+        try
+        {
+            Faulted?.Invoke(ex);
+        }
+        catch
+        {
+            // A throwing Faulted handler has nowhere left to report to — swallow rather than
+            // crash the loop that exists specifically to keep reporting failures.
+        }
+    }
+
+    /// <summary>Stops the background heartbeat loop and releases resources. Safe to call more than once.</summary>
     public async ValueTask DisposeAsync()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
         _cts.Cancel();
         if (_loop is not null)
         {

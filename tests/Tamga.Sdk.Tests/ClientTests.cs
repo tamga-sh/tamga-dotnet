@@ -133,6 +133,18 @@ public class ClientTests
     }
 
     [Fact]
+    public async Task GenerateOfflineProofAsync_Throws_ArgumentException_ForNonObjectDataset()
+    {
+        // Code-review regression: a non-object JsonNode (e.g. an array) must fail fast rather
+        // than silently being substituted with an empty object and sent to the server as {}.
+        var (client, handler) = MakeClient();
+        var arrayDataset = new JsonArray { 1, 2, 3 };
+
+        await Assert.ThrowsAsync<ArgumentException>(() => client.GenerateOfflineProofAsync(Guid.NewGuid(), arrayDataset));
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
     public async Task GenerateOfflineProofAsync_SendsEmptyDataset_ByDefault()
     {
         var (client, handler) = MakeClient();
