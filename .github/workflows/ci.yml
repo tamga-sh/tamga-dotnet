@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # AesGcm and Ed25519 (via NSec.Cryptography/libsodium) are
+        # OS-crypto-backend-sensitive — see CLAUDE.md "Cryptography
+        # Backend". Every crypto-touching test must pass identically on
+        # all three OSes before a PR touching Crypto/ or Checkout/ merges.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # MinVer needs full history to find the nearest tag
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore Tamga.sln
+
+      - name: Format check
+        # Fails the job on formatting drift against .editorconfig instead of
+        # auto-fixing in CI — auto-fix belongs in a local pre-commit step.
+        run: dotnet format Tamga.sln --verify-no-changes
+
+      - name: Build
+        run: dotnet build Tamga.sln -c Release --no-restore
+
+      - name: Test with coverage gate
+        # coverlet.msbuild's inline threshold fails the build the moment
+        # coverage drops below 80% line coverage — no separate coverage-
+        # check tool or follow-up job needed.
+        run: >
+          dotnet test Tamga.sln -c Release --no-build
+          --collect:"XPlat Code Coverage"
+          --results-directory ./coverage
+          /p:CollectCoverage=true
+          /p:CoverletOutputFormat=cobertura
+          /p:Threshold=80
+          /p:ThresholdType=line
+          /p:ThresholdStat=total
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          directory: ./coverage
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: false

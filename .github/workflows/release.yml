@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # Runs on every push to main: opens/updates a release PR whose merge
+  # produces the tag + GitHub Release that the `publish` job below reacts
+  # to. release-type "simple" means changelog + tag only — there is no
+  # per-language version file for release-please to bump; MinVer (see
+  # Tamga.Sdk.csproj) derives the actual NuGet package version from that
+  # tag at `dotnet pack` time. See CLAUDE.md "Versioning & Release".
+  release-please:
+    name: release-please
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  # Runs only when a release-please PR is merged and its GitHub Release is
+  # published — packs and pushes the resulting version to NuGet.org.
+  publish:
+    name: publish to NuGet
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # MinVer needs full history to find the just-created tag
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore Tamga.sln
+
+      - name: Pack
+        # MinVer reads the tag from the release that triggered this job and
+        # stamps the resulting .nupkg with the correct version automatically.
+        run: dotnet pack src/Tamga.Sdk/Tamga.Sdk.csproj -c Release -o ./artifacts
+
+      - name: Push to NuGet.org
+        # NUGET_API_KEY is the deliberate, boring, safe v0.1 default.
+        # NuGet.org's Trusted Publishing/OIDC path is newer and not yet
+        # confirmed stable enough across `dotnet nuget push` tooling
+        # specifically to be the primary path here — see CLAUDE.md
+        # "Publishing Method" for the living decision record.
+        run: >
+          dotnet nuget push ./artifacts/*.nupkg
+          --source https://api.nuget.org/v3/index.json
+          --api-key ${{ secrets.NUGET_API_KEY }}
+          --skip-duplicate

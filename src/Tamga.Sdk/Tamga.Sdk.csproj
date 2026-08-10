@@ -1,0 +1,50 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      net8.0 ONLY for v0.1. Do not add netstandard2.0 here without also adding
+      a BouncyCastle (or similar) fallback for AesGcm/Ed25519 — see CLAUDE.md
+      "Cryptography Backend" gotcha. Do not "fix" the NSec.Cryptography
+      dependency below by swapping to BCL Ed25519 — BCL Ed25519 does not
+      exist until .NET 9.
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Tamga.Sdk</RootNamespace>
+    <AssemblyName>Tamga.Sdk</AssemblyName>
+  </PropertyGroup>
+
+  <PropertyGroup Label="NuGet package metadata">
+    <PackageId>Tamga.Sdk</PackageId>
+    <Authors>Tamga</Authors>
+    <Description>Official .NET SDK for Tamga. Integrate license activation, offline verification, and machine management into your C#/.NET applications.</Description>
+    <RepositoryUrl>https://github.com/tamga-sh/tamga-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>tamga;licensing;license;activation;dotnet;sdk</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!--
+      MinVer (below) derives the package version from the git tag at pack
+      time. There is deliberately no <Version> here to hand-bump — see
+      CLAUDE.md "Versioning & Release" and docs/plans/tamga-dotnet.plan.md §6.
+    -->
+    <MinVerTagPrefix>v</MinVerTagPrefix>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MinVer" Version="6.0.0">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      Ed25519 has no BCL implementation on net8.0 (arrives in .NET 9's
+      System.Security.Cryptography). NSec.Cryptography (libsodium binding) is
+      the one non-BCL crypto dependency in this SDK — see CLAUDE.md.
+    -->
+    <PackageReference Include="NSec.Cryptography" Version="24.4.0" />
+  </ItemGroup>
+
+</Project>

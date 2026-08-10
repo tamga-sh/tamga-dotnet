@@ -1,0 +1,19 @@
+<Project>
+
+  <!--
+    Shared MSBuild settings for every csproj under src/ and tests/, so these
+    don't get duplicated (and drift) per-project. See CLAUDE.md for the
+    net8.0-only v0.1 scope rationale.
+  -->
+
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningsNotAsErrors>CS1591</WarningsNotAsErrors>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);NU5104</NoWarn>
+  </PropertyGroup>
+
+</Project>
