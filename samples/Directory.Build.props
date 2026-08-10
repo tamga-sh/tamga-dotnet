@@ -1,0 +1,20 @@
+<Project>
+
+  <!--
+    Samples are illustrative console apps, not shipped library code — relax
+    the strict library-wide gates from the root Directory.Build.props
+    (TreatWarningsAsErrors, GenerateDocumentationFile) so a missing XML doc
+    comment on `Main` doesn't fail the build, while keeping Nullable/
+    ImplicitUsings/LangVersion consistent with the rest of the repo.
+  -->
+
+  <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+</Project>
