@@ -34,6 +34,8 @@ jobs:
     name: publish to NuGet
     if: github.event_name == 'release' && github.event.action == 'published'
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # required to request the GitHub OIDC token for NuGet.org Trusted Publishing
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -53,14 +55,21 @@ jobs:
         # stamps the resulting .nupkg with the correct version automatically.
         run: dotnet pack src/Tamga.Sdk/Tamga.Sdk.csproj -c Release -o ./artifacts
 
+      - name: NuGet login (OIDC → short-lived API key)
+        # Trusted Publishing: exchanges this job's GitHub OIDC token for a
+        # ~1-hour NuGet.org API key, validated against the "tamga-dotnet-ci"
+        # policy registered at nuget.org (Package Owner: Tamga, Repository
+        # Owner: tamga-sh, Repository: tamga-dotnet, Workflow File:
+        # release.yml). No long-lived secret stored in this repo — see
+        # CLAUDE.md "Publishing Method".
+        uses: NuGet/login@v1
+        id: login
+        with:
+          user: Tamga # nuget.org Package Owner the trusted-publishing policy was registered under
+
       - name: Push to NuGet.org
-        # NUGET_API_KEY is the deliberate, boring, safe v0.1 default.
-        # NuGet.org's Trusted Publishing/OIDC path is newer and not yet
-        # confirmed stable enough across `dotnet nuget push` tooling
-        # specifically to be the primary path here — see CLAUDE.md
-        # "Publishing Method" for the living decision record.
         run: >
           dotnet nuget push ./artifacts/*.nupkg
           --source https://api.nuget.org/v3/index.json
-          --api-key ${{ secrets.NUGET_API_KEY }}
+          --api-key ${{ steps.login.outputs.NUGET_API_KEY }}
           --skip-duplicate
