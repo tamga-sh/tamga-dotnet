@@ -47,11 +47,14 @@ jobs:
       - name: Test with coverage gate
         # coverlet.msbuild's inline threshold fails the build the moment
         # coverage drops below 80% line coverage — no separate coverage-
-        # check tool or follow-up job needed.
+        # check tool or follow-up job needed. This is coverlet.msbuild
+        # (the /p:CollectCoverage=true MSBuild property), NOT the VSTest
+        # "XPlat Code Coverage" data collector — the two are different
+        # mechanisms with different default output locations; do not add
+        # --collect:"XPlat Code Coverage" back without also updating the
+        # codecov step's path, or codecov silently finds nothing again.
         run: >
           dotnet test Tamga.sln -c Release --no-build
-          --collect:"XPlat Code Coverage"
-          --results-directory ./coverage
           /p:CollectCoverage=true
           /p:CoverletOutputFormat=cobertura
           /p:Threshold=80
@@ -61,6 +64,9 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
-          directory: ./coverage
+          # coverlet.msbuild writes next to the test project by default —
+          # there is no ./coverage/ directory to point at (a previous
+          # `directory: ./coverage` here silently found 0 files).
+          files: ./tests/Tamga.Sdk.Tests/coverage.cobertura.xml
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
