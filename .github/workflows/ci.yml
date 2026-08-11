@@ -62,7 +62,7 @@ jobs:
           /p:ThresholdStat=total
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           # coverlet.msbuild writes next to the test project by default —
           # there is no ./coverage/ directory to point at (a previous
