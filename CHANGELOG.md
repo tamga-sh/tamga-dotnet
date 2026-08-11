@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.4](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.3...v1.0.4) (2026-08-11)
+
+
+### Bug Fixes
+
+* **ci:** pass explicit repo slug to codecov-action ([a177f0e](https://github.com/tamga-sh/tamga-dotnet/commit/a177f0e1dc861eea624e6b734ea95cc16c6268e2))
+
 ## [1.0.3](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.2...v1.0.3) (2026-08-11)
 
 
