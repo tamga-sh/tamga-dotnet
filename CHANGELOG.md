@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.3](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.2...v1.0.3) (2026-08-11)
+
+
+### Bug Fixes
+
+* **ci:** use the trust policy creator's nuget.org username ([97b1457](https://github.com/tamga-sh/tamga-dotnet/commit/97b1457ca372d4a48ea817e4b3312d264278cc7e))
+
 ## [1.0.2](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.1...v1.0.2) (2026-08-11)
 
 
