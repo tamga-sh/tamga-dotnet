@@ -73,15 +73,21 @@ jobs:
 
       - name: NuGet login (OIDC → short-lived API key)
         # Trusted Publishing: exchanges this job's GitHub OIDC token for a
-        # ~1-hour NuGet.org API key, validated against the "tamga-dotnet-ci"
-        # policy registered at nuget.org (Package Owner: Tamga, Repository
-        # Owner: tamga-sh, Repository: tamga-dotnet, Workflow File:
-        # release.yml). No long-lived secret stored in this repo — see
-        # CLAUDE.md "Publishing Method".
+        # ~1-hour NuGet.org API key, validated against the trust policy
+        # registered at nuget.org (Package Owner: Tamga, Repository Owner:
+        # tamga-sh, Repository: tamga-dotnet, Workflow File: release.yml).
+        # No long-lived secret stored in this repo — see CLAUDE.md
+        # "Publishing Method".
         uses: NuGet/login@v1
         id: login
         with:
-          user: Tamga # nuget.org Package Owner the trusted-publishing policy was registered under
+          # Must be the nuget.org username of the account that CREATED the
+          # trust policy (the "policy creator"), NOT the Package Owner
+          # ("Tamga") selected inside that policy — nuget.org's OIDC token
+          # exchange looks up policies by creator account and returned
+          # HTTP 401 "No matching trust policy owned by user 'Tamga'" until
+          # this was corrected.
+          user: necipsunmaz
 
       - name: Push to NuGet.org
         run: >
