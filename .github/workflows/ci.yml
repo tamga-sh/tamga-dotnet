@@ -69,4 +69,9 @@ jobs:
           # `directory: ./coverage` here silently found 0 files).
           files: ./tests/Tamga.Sdk.Tests/coverage.cobertura.xml
           token: ${{ secrets.CODECOV_TOKEN }}
+          # Required when CODECOV_TOKEN is the org's shared Global Upload
+          # Token (one token for every Tamga SDK repo) rather than a
+          # per-repo token — without it Codecov can't tell which repo an
+          # upload belongs to.
+          slug: tamga-sh/tamga-dotnet
           fail_ci_if_error: false
