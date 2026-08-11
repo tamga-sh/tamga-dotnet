@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.0...v1.0.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* **ci:** gate NuGet publish on release-please's own job output ([5e51fac](https://github.com/tamga-sh/tamga-dotnet/commit/5e51fac060d5e8a18f6b2cfde5eade9a18664c52))
+
 ## 1.0.0 (2026-08-11)
 
 
