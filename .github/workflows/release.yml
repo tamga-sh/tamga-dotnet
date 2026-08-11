@@ -46,6 +46,11 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
+      # A job-level `permissions:` block replaces the workflow-level
+      # default for that job rather than adding to it — contents: read is
+      # required here for actions/checkout to work at all, it is not
+      # inherited from the top-level `contents: write`.
+      contents: read
       id-token: write # required to request the GitHub OIDC token for NuGet.org Trusted Publishing
     steps:
       - name: Checkout
