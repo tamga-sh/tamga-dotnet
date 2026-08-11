@@ -1,14 +1,16 @@
 # Tamga.Sdk
 
+[![CI](https://github.com/tamga-sh/tamga-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-dotnet/actions/workflows/ci.yml)
+[![NuGet version](https://img.shields.io/nuget/v/Tamga.Sdk.svg)](https://www.nuget.org/packages/Tamga.Sdk)
+[![coverage](https://codecov.io/gh/tamga-sh/tamga-dotnet/branch/main/graph/badge.svg)](https://codecov.io/gh/tamga-sh/tamga-dotnet)
+
 Official .NET SDK for Tamga. Integrate license activation, offline
 verification, and machine management into your C#/.NET applications.
 
-> **Status: v0.1 (pre-1.0).** Sections A–K of the implementation plan are
-> complete — license validation, check-in, offline license/machine file
-> checkout + verification, machine management, components/processes, and
-> entitlements are all implemented and covered by the test suite. Track
-> progress in
-> [`docs/plans/tamga-dotnet.plan.md`](docs/plans/tamga-dotnet.plan.md).
+> **Status: actively developed.** License validation, check-in, offline
+> license/machine file checkout + verification, machine management,
+> components/processes, and entitlements are all implemented and covered by
+> the test suite.
 
 ## Install
 
@@ -101,9 +103,6 @@ scoped to what this SDK's consumers need to know:
 
 ## Documentation
 
-- [`docs/plans/tamga-dotnet.plan.md`](docs/plans/tamga-dotnet.plan.md) — this
-  repository's implementation plan (architecture, protocol reference,
-  quality gates, CI/release design).
 - [`tamga-api/docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) —
   the authoritative, server-verified protocol/feature spec every SDK in the
   `tamga-sh` organization is built against, including the full "Known
