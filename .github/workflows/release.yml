@@ -54,7 +54,7 @@ jobs:
       id-token: write # required to request the GitHub OIDC token for NuGet.org Trusted Publishing
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # MinVer needs full history to find the just-created tag
 
