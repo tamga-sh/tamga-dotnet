@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.2](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.1...v1.0.2) (2026-08-11)
+
+
+### Bug Fixes
+
+* **ci:** grant contents:read to the publish job ([a18d744](https://github.com/tamga-sh/tamga-dotnet/commit/a18d744627b35e972483a7f0deb1241da47e43a5))
+* **ci:** point Codecov at coverlet's actual output path ([d603d4d](https://github.com/tamga-sh/tamga-dotnet/commit/d603d4dcc2baef34b0175fb3b61526d77991159d))
+
 ## [1.0.1](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.0...v1.0.1) (2026-08-11)
 
 
