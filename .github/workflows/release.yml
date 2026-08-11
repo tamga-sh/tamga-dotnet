@@ -3,36 +3,47 @@ name: Release
 on:
   push:
     branches: [main]
-  release:
-    types: [published]
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  # Runs on every push to main: opens/updates a release PR whose merge
-  # produces the tag + GitHub Release that the `publish` job below reacts
-  # to. release-type "simple" means changelog + tag only — there is no
-  # per-language version file for release-please to bump; MinVer (see
-  # Tamga.Sdk.csproj) derives the actual NuGet package version from that
-  # tag at `dotnet pack` time. See CLAUDE.md "Versioning & Release".
+  # Runs on every push to main: opens/updates a release PR, or — when a
+  # pending release-please PR was just merged — creates the tag + GitHub
+  # Release directly. release-type "simple" means changelog + tag only —
+  # there is no per-language version file for release-please to bump;
+  # MinVer (see Tamga.Sdk.csproj) derives the actual NuGet package version
+  # from that tag at `dotnet pack` time. See CLAUDE.md "Versioning & Release".
   release-please:
     name: release-please
-    if: github.event_name == 'push'
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: release
         with:
           release-type: simple
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  # Runs only when a release-please PR is merged and its GitHub Release is
-  # published — packs and pushes the resulting version to NuGet.org.
+  # Runs only right after release-please's own step above actually created
+  # a release (i.e. this run was the release-PR-merge push) — packs and
+  # pushes the resulting version to NuGet.org.
+  #
+  # Deliberately gated via this job's `needs`/`if` on the release-please
+  # job's output, in the SAME workflow run, rather than a separate
+  # `on: release: types: [published]` trigger: release-please-action
+  # creates that GitHub Release using this workflow's own GITHUB_TOKEN,
+  # and GitHub does not let GITHUB_TOKEN-authored events trigger further
+  # workflow runs (loop-prevention) — so a `release: published` trigger
+  # here would simply never fire. See googleapis/release-please-action's
+  # README "Configuring Release Please" section (same-job output pattern).
   publish:
     name: publish to NuGet
-    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write # required to request the GitHub OIDC token for NuGet.org Trusted Publishing
