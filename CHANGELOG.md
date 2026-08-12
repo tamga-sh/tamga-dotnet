@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.0.5](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.4...v1.0.5) (2026-08-12)
+
+
+### Bug Fixes
+
+* clone caller-owned dataset before async serialization; add wrong-length-signature coverage ([bc3a4bb](https://github.com/tamga-sh/tamga-dotnet/commit/bc3a4bba9cb8a6d10424a22215c036251fcb7c6a))
+* clone caller-owned dataset before async serialization; add wrong-length-signature regression coverage ([b39a726](https://github.com/tamga-sh/tamga-dotnet/commit/b39a726ada0169bd1faff560caa2d309f38f393e))
+* enforce P-256 curve in Ecdsa.Verify (curve-confusion vulnerability) ([8b305c5](https://github.com/tamga-sh/tamga-dotnet/commit/8b305c5be3f5245b135ee1a8f561027b9e7e8dad))
+* enforce P-256 curve in Ecdsa.Verify (curve-confusion vulnerability) ([b2ba1f5](https://github.com/tamga-sh/tamga-dotnet/commit/b2ba1f516da032f38d23747c008b32972e1bc649))
+
 ## [1.0.4](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.3...v1.0.4) (2026-08-11)
 
 
