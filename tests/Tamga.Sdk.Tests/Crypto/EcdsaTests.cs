@@ -62,4 +62,20 @@ public class EcdsaTests
 
         Assert.False(Ecdsa.Verify(ecdsaP384, message, signature));
     }
+
+    /// <summary>
+    /// Locks in the fail-closed contract for a wrong-length signature against a validly
+    /// imported P-256 key -- same bug class as the already-fixed PemEnvelope.Strip HIGH
+    /// finding, in the signature-length dimension. Found no defect (BCL ECDsa.VerifyData
+    /// returns false, doesn't throw), but no prior test exercised this shape -- added per
+    /// the audit's recommendation.
+    /// </summary>
+    [Fact]
+    public void Verify_ReturnsFalse_ForWrongLengthSignature()
+    {
+        using var ecdsa = CreateKey();
+        var tooShort = new byte[3]; // P-256 IEEE P1363 signatures are always 64 bytes
+
+        Assert.False(Ecdsa.Verify(ecdsa, "machine file payload"u8.ToArray(), tooShort));
+    }
 }
