@@ -7,14 +7,31 @@ namespace Tamga.Sdk.Crypto;
 /// <see cref="System.Security.Cryptography.ECDsa"/> — no third-party dependency needed (available
 /// since .NET Core 3.0).
 /// </summary>
-/// <remarks>Used by <see cref="Checkout.MachineFile"/> — the ECDSA-P256 branch of the scheme-dispatched machine-file verifier.</remarks>
+/// <remarks>Used by <c>Checkout.MachineFile</c> — the ECDSA-P256 branch of the scheme-dispatched machine-file verifier.</remarks>
 public static class Ecdsa
 {
+    /// <summary>NIST P-256 (secp256r1) curve OID — see <see cref="Verify"/>'s curve-enforcement check.</summary>
+    private const string P256Oid = "1.2.840.10045.3.1.7";
+
     /// <summary>
     /// Verifies an ECDSA P-256/SHA-256 signature over raw <c>(r, s)</c> concatenated bytes
     /// (<see cref="DSASignatureFormat.IeeeP1363FixedFieldConcatenation"/> — the conventional wire
     /// format for this scheme, as opposed to DER-encoded ASN.1).
     /// </summary>
-    public static bool Verify(ECDsa publicKey, ReadOnlySpan<byte> message, ReadOnlySpan<byte> signature) =>
-        publicKey.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    /// <remarks>
+    /// SECURITY: <paramref name="publicKey"/>'s curve is whatever the caller constructed it with —
+    /// when built via <c>ImportSubjectPublicKeyInfo</c> (the machine-file path), the curve comes
+    /// from the input bytes' own embedded OID. Without checking it here, a validly-signed message
+    /// from any other curve (e.g. P-384) would verify successfully, since SHA-256 is just the
+    /// digest algorithm and is independent of curve choice. Found via audit; see
+    /// <c>EcdsaTests.Verify_ReturnsFalse_WhenKeyItselfIsNotP256</c> for the regression coverage.
+    /// </remarks>
+    public static bool Verify(ECDsa publicKey, ReadOnlySpan<byte> message, ReadOnlySpan<byte> signature)
+    {
+        if (publicKey.KeySize != 256 || publicKey.ExportParameters(false).Curve.Oid.Value != P256Oid)
+        {
+            return false;
+        }
+        return publicKey.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+    }
 }

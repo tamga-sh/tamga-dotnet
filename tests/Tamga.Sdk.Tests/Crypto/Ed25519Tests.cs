@@ -67,4 +67,22 @@ public class Ed25519Tests
         var badKey = new byte[] { 1, 2, 3 };
         Assert.False(TamgaEd25519.Verify(badKey, "msg"u8.ToArray(), new byte[64]));
     }
+
+    /// <summary>
+    /// Locks in the fail-closed contract for a base64-decodable-but-wrong-length signature
+    /// against a validly-imported key — the same bug class as the already-fixed
+    /// PemEnvelope.Strip HIGH finding (untyped exception from malformed untrusted crypto
+    /// input instead of a documented false/typed exception), just in the signature-length
+    /// dimension. Found no defect (NSec.Cryptography returns false, doesn't throw), but no
+    /// prior test exercised this specific shape — added per the audit's recommendation.
+    /// </summary>
+    [Fact]
+    public void Verify_ReturnsFalse_ForWrongLengthSignature()
+    {
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var tooShort = new byte[3]; // Ed25519 signatures are always 64 bytes
+
+        Assert.False(TamgaEd25519.Verify(publicKey, "hello tamga"u8.ToArray(), tooShort));
+    }
 }

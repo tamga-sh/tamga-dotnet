@@ -59,4 +59,29 @@ public class RsaTests
 
         Assert.False(Rsa.VerifyPkcs1(rsa, message, pssSignature));
     }
+
+    /// <summary>
+    /// Locks in the fail-closed contract for a wrong-length signature against a validly
+    /// imported RSA-2048 key -- same bug class as the already-fixed PemEnvelope.Strip HIGH
+    /// finding, in the signature-length dimension. Found no defect (BCL RSA.VerifyData
+    /// returns false, doesn't throw), but no prior test exercised this shape -- added per
+    /// the audit's recommendation.
+    /// </summary>
+    [Fact]
+    public void VerifyPkcs1_ReturnsFalse_ForWrongLengthSignature()
+    {
+        using var rsa = CreateKey();
+        var tooShort = new byte[3]; // RSA-2048 signatures are always 256 bytes
+
+        Assert.False(Rsa.VerifyPkcs1(rsa, "machine file payload"u8.ToArray(), tooShort));
+    }
+
+    [Fact]
+    public void VerifyPss_ReturnsFalse_ForWrongLengthSignature()
+    {
+        using var rsa = CreateKey();
+        var tooShort = new byte[3];
+
+        Assert.False(Rsa.VerifyPss(rsa, "machine file payload"u8.ToArray(), tooShort));
+    }
 }
