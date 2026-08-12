@@ -32,7 +32,12 @@ public sealed partial class TamgaClient
                 datasetObject = new JsonObject();
                 break;
             case JsonObject obj:
-                datasetObject = obj;
+                // Defensive copy: obj is caller-owned and this method serializes it later,
+                // after an await (inside SendJsonApiAsync) -- without cloning, a caller that
+                // mutates the same JsonObject instance from another thread between this call
+                // and the point the request body is actually serialized would send bytes the
+                // caller never intended, with no error. Found via audit.
+                datasetObject = obj.DeepClone().AsObject();
                 break;
             default:
                 // CRITICAL (found in code review): silently substituting an empty object here
