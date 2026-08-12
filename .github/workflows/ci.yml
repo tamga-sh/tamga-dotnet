@@ -24,12 +24,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0 # MinVer needs full history to find the nearest tag
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 8.0.x
 
@@ -62,7 +62,7 @@ jobs:
           /p:ThresholdStat=total
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           # coverlet.msbuild writes next to the test project by default —
           # there is no ./coverage/ directory to point at (a previous
