@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.0](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.5...v1.1.0) (2026-08-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* offline license files must be format v2 (`alg` ending in `+v2`). v1 files are rejected outright with no compatibility path. `Crypto/NaiveKey.cs` is removed, not deprecated.
+
+### Features
+
+* SDK v2 security contract — license-file HKDF, offline format v2, HTTP 429 handling ([0acc95a](https://github.com/tamga-sh/tamga-dotnet/commit/0acc95a2a080e17d341206d13a3357d5d16e170a))
+
 ## [1.0.5](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.4...v1.0.5) (2026-08-12)
 
 
