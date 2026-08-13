@@ -154,12 +154,54 @@ public sealed record License
         resource.Relationships is { } rels && rels.TryGetValue(name, out var rel) ? rel.Data?.Id : null;
 }
 
-/// <summary>The <c>{"data": &lt;LicenseResource&gt;}</c> payload embedded in a plain (unencrypted) <c>.lic</c> file.</summary>
+/// <summary>
+/// The <c>{"data": &lt;LicenseResource&gt;, "meta": &lt;claims&gt;}</c> payload embedded in a
+/// format-v2 <c>.lic</c> file.
+/// </summary>
 public sealed record LicenseFilePayload
 {
     /// <summary>The wrapped JSON:API license resource.</summary>
     [JsonPropertyName("data")]
     public required JsonApiResource<LicenseAttributes> Data { get; init; }
+
+    /// <summary>
+    /// The claims that were covered by the signature. Absent only on a pre-v2 file, which is
+    /// rejected.
+    /// </summary>
+    [JsonPropertyName("meta")]
+    public LicenseFileClaims? Meta { get; init; }
+}
+
+/// <summary>
+/// The claims carried <em>inside</em> the signed bytes of a <c>.lic</c> file.
+/// </summary>
+/// <remarks>
+/// These are the point of format v2. In v1 the <c>ttl</c>/<c>expiry</c> a caller asked for lived
+/// only in the JSON:API envelope around the certificate, never inside the signed bytes — so a
+/// 24-hour trial file was cryptographically valid forever, because the client is the attacker and
+/// any check built on the envelope is bypassed by keeping (or redistributing) the raw certificate
+/// string. Unlike the envelope, these cannot be edited by whoever holds the file.
+/// </remarks>
+public sealed record LicenseFileClaims
+{
+    /// <summary>Issued-at, seconds since the Unix epoch.</summary>
+    [JsonPropertyName("iat")]
+    public long IssuedAt { get; init; }
+
+    /// <summary>
+    /// Expiry, seconds since the Unix epoch. <c>null</c> means the file never expires — checkout
+    /// was made without a <c>ttl</c>.
+    /// </summary>
+    [JsonPropertyName("exp")]
+    public long? ExpiresAt { get; init; }
+
+    /// <summary>Unique per checkout — usable for replay detection.</summary>
+    [JsonPropertyName("jti")]
+    public string Id { get; init; } = string.Empty;
+
+    /// <summary>Identifies the signing key, so a file survives a key rotation.</summary>
+    [JsonPropertyName("kid")]
+    public string KeyId { get; init; } = string.Empty;
 }
 
 /// <summary>
