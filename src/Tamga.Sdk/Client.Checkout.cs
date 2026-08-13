@@ -76,7 +76,7 @@ public sealed partial class TamgaClient
     /// <summary>
     /// <c>POST /licenses/{license_id}/actions/check-out</c> — checks out an offline <c>.lic</c>
     /// file. Returns the parsed, UNVERIFIED <see cref="LicenseFile"/> — call
-    /// <see cref="LicenseFile.Verify"/> or <see cref="LicenseFile.VerifyAndDecrypt"/> separately.
+    /// <see cref="LicenseFile.Verify"/> or <see cref="LicenseFile.VerifyAndDecrypt(System.ReadOnlySpan{byte}, string)"/> separately.
     /// </summary>
     public async Task<LicenseFile> CheckOutLicenseAsync(
         Guid licenseId,

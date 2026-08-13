@@ -172,6 +172,25 @@ public sealed class UnsupportedAlgorithmException : Exception
 }
 
 /// <summary>
+/// Thrown when a <c>.lic</c> file's signature verified but its signed <c>exp</c> claim has
+/// passed — an authentic license file that has simply run out.
+/// </summary>
+/// <remarks>
+/// Its own type on purpose: a caller that cannot tell "expired" from "forged" either warns the
+/// user about tampering when their trial merely ended, or treats a forgery as a renewal prompt.
+/// </remarks>
+public sealed class LicenseFileExpiredException : Exception
+{
+    /// <summary>The <c>exp</c> claim, seconds since the Unix epoch.</summary>
+    public long ExpiresAt { get; }
+
+    /// <summary>Constructs the exception for a file that expired at <paramref name="expiresAt"/>.</summary>
+    public LicenseFileExpiredException(long expiresAt)
+        : base($"License file expired at unix timestamp {expiresAt}.")
+        => ExpiresAt = expiresAt;
+}
+
+/// <summary>
 /// Thrown client-side when a <c>.lic</c>/<c>.machine</c> PEM envelope or its inner JSON is
 /// malformed (missing markers, invalid base64, invalid JSON shape).
 /// </summary>

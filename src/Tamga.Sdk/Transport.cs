@@ -1,3 +1,4 @@
+using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -28,6 +29,16 @@ public sealed class TamgaClientOptions
 
     /// <summary>Request timeout applied to an internally-constructed <see cref="HttpClient"/>. Ignored when an external <see cref="HttpClient"/> is supplied to <see cref="TamgaClient"/>.</summary>
     public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How many times a rate-limited (<c>429</c>) request is retried before giving up.
+    /// </summary>
+    /// <remarks>
+    /// Set to <c>0</c> to handle <c>429</c> yourself — the thrown exception still reports the
+    /// status, and the server's <c>Retry-After</c> tells you how long to wait. Only requests safe
+    /// to repeat are retried; creates never are.
+    /// </remarks>
+    public int MaxRetries { get; init; } = 3;
 
     /// <summary>Which of the 5 auth transports to use. <see langword="null"/> sends no credentials.</summary>
     public AuthTransport? Auth { get; init; }
@@ -365,7 +376,148 @@ public sealed class TamgaTransport
         // GOTCHA: do NOT add a Tamga-Environment request header here — it's an unimplemented,
         // planned EE feature with no server-side read path (docs/sdk.md gap #7).
 
-        return await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        return await SendWithRetryAsync(request, method, path, jsonBody, mediaType, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// How many times a rate-limited (<c>429</c>) request is retried before giving up.
+    /// </summary>
+    /// <remarks>
+    /// Three rides out a short burst without turning a sustained 429 into a request that hangs
+    /// for minutes.
+    /// </remarks>
+    public const int DefaultMaxRetries = 3;
+
+    /// <summary>How much of a <c>Retry-After</c> is honoured, in seconds.</summary>
+    private const int MaxRetryAfterSeconds = 60;
+
+    /// <summary>How much clock skew is tolerated when checking exp — see LicenseFile.</summary>
+    private static readonly string[] RetryablePostSuffixes =
+    [
+        "/actions/validate",
+        "/actions/validate-key",
+        "/actions/check-in",
+        "/actions/check-out",
+        "/actions/ping",
+    ];
+
+    /// <summary>Is this request safe to repeat after a <c>429</c>?</summary>
+    /// <remarks>
+    /// <c>GET</c> always is. Among the <c>POST</c>s only the licensing <em>actions</em> are — they
+    /// are effectively idempotent (validate, check in/out, ping a heartbeat) and they are
+    /// precisely the calls a client makes on a timer, so they are the ones that hit the rate limit
+    /// in the first place.
+    ///
+    /// Creates are deliberately excluded: retrying <c>POST /machines</c> risks a second activation
+    /// burning a second seat, and only the caller knows whether that is acceptable.
+    /// </remarks>
+    public static bool IsRetryable(HttpMethod method, string path)
+    {
+        if (method == HttpMethod.Get)
+        {
+            return true;
+        }
+
+        if (method != HttpMethod.Post)
+        {
+            return false;
+        }
+
+        foreach (var suffix in RetryablePostSuffixes)
+        {
+            if (path.EndsWith(suffix, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>How long to wait before retry number <paramref name="attempt"/> (0-based).</summary>
+    /// <remarks>
+    /// Prefers the server's <c>Retry-After</c> — it knows when the bucket refills, and guessing
+    /// wastes the budget — but caps it, so a misconfigured or hostile proxy cannot park the caller
+    /// for an hour on one header. Otherwise exponential backoff with jitter, because a fleet that
+    /// all retries on the same schedule reconverges into the spike it was backing off from.
+    /// </remarks>
+    public static TimeSpan RetryDelay(int attempt, int? retryAfterSeconds)
+    {
+        if (retryAfterSeconds is { } secs)
+        {
+            return TimeSpan.FromSeconds(Math.Min(secs, MaxRetryAfterSeconds));
+        }
+
+        var baseSeconds = 1 << Math.Min(attempt, 5);
+        return TimeSpan.FromSeconds(baseSeconds) + TimeSpan.FromMilliseconds(Random.Shared.Next(1000));
+    }
+
+    /// <summary>Reads <c>Retry-After</c> as delta-seconds.</summary>
+    /// <remarks>
+    /// The HTTP-date form is ignored deliberately: the server sends seconds, and misreading a date
+    /// as a duration would be far worse than falling back to the client's own backoff.
+    /// </remarks>
+    public static int? ParseRetryAfter(HttpResponseMessage response)
+        => response.Headers.RetryAfter?.Delta is { } delta ? (int)delta.TotalSeconds : null;
+
+    /// <summary>
+    /// Sends the request, transparently retrying while the server answers <c>429</c>.
+    /// </summary>
+    /// <remarks>
+    /// Credential-accepting endpoints run on a tight per-IP budget (5 req/s by default) and the
+    /// calls a licensing client makes on a timer are exactly the ones inside it. Without backoff,
+    /// one throttled request becomes a sustained burst that keeps the bucket empty and the client
+    /// never recovers on its own.
+    ///
+    /// An <see cref="HttpRequestMessage"/> cannot be sent twice, so each attempt gets a fresh copy.
+    /// </remarks>
+    private async Task<HttpResponseMessage> SendWithRetryAsync(
+        HttpRequestMessage prototype,
+        HttpMethod method,
+        string path,
+        object? jsonBody,
+        string mediaType,
+        CancellationToken cancellationToken)
+    {
+        var retryable = IsRetryable(method, path);
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var request = attempt == 0 ? prototype : CloneRequest(prototype, jsonBody, mediaType);
+            var response = await _httpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode != HttpStatusCode.TooManyRequests
+                || !retryable
+                || attempt >= _options.MaxRetries)
+            {
+                return response;
+            }
+
+            var delay = RetryDelay(attempt, ParseRetryAfter(response));
+            response.Dispose();
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private static HttpRequestMessage CloneRequest(
+        HttpRequestMessage prototype,
+        object? jsonBody,
+        string mediaType)
+    {
+        var clone = new HttpRequestMessage(prototype.Method, prototype.RequestUri);
+        foreach (var header in prototype.Headers)
+        {
+            clone.Headers.TryAddWithoutValidation(header.Key, header.Value);
+        }
+
+        if (jsonBody is not null)
+        {
+            var json = JsonSerializer.Serialize(jsonBody, jsonBody.GetType(), TamgaJsonOptions.Default);
+            clone.Content = new StringContent(json, Encoding.UTF8, mediaType);
+        }
+
+        return clone;
     }
 
     /// <summary>

@@ -16,20 +16,37 @@ public class LicenseFileTests
         return (key.PublicKey.Export(KeyBlobFormat.RawPublicKey), key);
     }
 
-    private static string BuildPayloadJson(Guid licenseId, string key) => new JsonObject
+    private static string BuildPayloadJson(Guid licenseId, string key, long? exp = null)
     {
-        ["data"] = new JsonObject
+        var meta = new JsonObject
         {
-            ["type"] = "licenses",
-            ["id"] = licenseId.ToString(),
-            ["attributes"] = new JsonObject
+            ["iat"] = 1767225600L,
+            ["jti"] = "test-jti",
+            ["kid"] = "test-kid",
+        };
+        if (exp is { } value)
+        {
+            meta["exp"] = value;
+        }
+
+        return new JsonObject
+        {
+            ["data"] = new JsonObject
             {
-                ["key"] = key,
-                ["suspended"] = false,
-                ["uses"] = 3,
+                ["type"] = "licenses",
+                ["id"] = licenseId.ToString(),
+                ["attributes"] = new JsonObject
+                {
+                    ["key"] = key,
+                    ["suspended"] = false,
+                    ["uses"] = 3,
+                },
             },
-        },
-    }.ToJsonString();
+            // Format v2 puts the claims inside the signed bytes. A payload
+            // without them is a v1 file and no longer verifies.
+            ["meta"] = meta,
+        }.ToJsonString();
+    }
 
     private static string WrapPem(string certJson)
     {
@@ -53,7 +70,7 @@ public class LicenseFileTests
         var licenseId = Guid.NewGuid();
         var payloadJson = BuildPayloadJson(licenseId, "LIC-ABC-123");
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
-        var pem = BuildValidPem(privateKey, enc, "base64+ed25519");
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519+v2");
 
         var licenseFile = LicenseFile.Parse(pem);
         Assert.True(licenseFile.Verify(publicKey));
@@ -76,7 +93,7 @@ public class LicenseFileTests
 
         var nonce = new byte[AesGcmCipher.NonceLength];
         System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
-        var aesKey = NaiveKey.Derive(licenseKey);
+        var aesKey = Hkdf.DeriveLicenseFileKey(licenseKey);
         var (ciphertext, tag) = AesGcmCipher.Seal(aesKey, nonce, plaintext);
         var payload = new byte[nonce.Length + ciphertext.Length + tag.Length];
         Buffer.BlockCopy(nonce, 0, payload, 0, nonce.Length);
@@ -84,7 +101,7 @@ public class LicenseFileTests
         Buffer.BlockCopy(tag, 0, payload, nonce.Length + ciphertext.Length, tag.Length);
         var enc = Convert.ToBase64String(payload);
 
-        var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519");
+        var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519+v2");
         var licenseFile = LicenseFile.Parse(pem);
         Assert.True(licenseFile.Verify(publicKey));
 
@@ -102,7 +119,7 @@ public class LicenseFileTests
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
         var sigBytes = SignatureAlgorithm.Ed25519.Sign(privateKey, Encoding.UTF8.GetBytes(enc));
         sigBytes[0] ^= 0xFF;
-        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(sigBytes), alg = "base64+ed25519" });
+        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(sigBytes), alg = "base64+ed25519+v2" });
 
         var licenseFile = LicenseFile.Parse(WrapPem(certJson));
         Assert.False(licenseFile.Verify(publicKey));
@@ -119,7 +136,7 @@ public class LicenseFileTests
 
         var tamperedPayloadJson = BuildPayloadJson(Guid.NewGuid(), "LIC-XYZ");
         var tamperedEnc = Convert.ToBase64String(Encoding.UTF8.GetBytes(tamperedPayloadJson));
-        var certJson = JsonSerializer.Serialize(new { enc = tamperedEnc, sig, alg = "base64+ed25519" });
+        var certJson = JsonSerializer.Serialize(new { enc = tamperedEnc, sig, alg = "base64+ed25519+v2" });
 
         var licenseFile = LicenseFile.Parse(WrapPem(certJson));
         Assert.False(licenseFile.Verify(publicKey));
@@ -139,7 +156,7 @@ public class LicenseFileTests
         var enc = Convert.ToBase64String(payloadBytes);
 
         var wrongSignature = SignatureAlgorithm.Ed25519.Sign(privateKey, payloadBytes); // decoded bytes — WRONG
-        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(wrongSignature), alg = "base64+ed25519" });
+        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(wrongSignature), alg = "base64+ed25519+v2" });
 
         var licenseFile = LicenseFile.Parse(WrapPem(certJson));
         Assert.False(licenseFile.Verify(publicKey));
@@ -190,7 +207,7 @@ public class LicenseFileTests
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "LIC-ABC")));
         var sigBytes = SignatureAlgorithm.Ed25519.Sign(privateKey, Encoding.UTF8.GetBytes(enc));
         sigBytes[0] ^= 0xFF;
-        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(sigBytes), alg = "base64+ed25519" });
+        var certJson = JsonSerializer.Serialize(new { enc, sig = Convert.ToBase64String(sigBytes), alg = "base64+ed25519+v2" });
 
         var licenseFile = LicenseFile.Parse(WrapPem(certJson));
         Assert.Throws<SignatureVerificationException>(() => licenseFile.VerifyAndDecrypt(publicKey, "unused"));
@@ -204,16 +221,106 @@ public class LicenseFileTests
         var payloadJson = BuildPayloadJson(Guid.NewGuid(), "LIC-ABC");
         var plaintext = Encoding.UTF8.GetBytes(payloadJson);
         var nonce = new byte[AesGcmCipher.NonceLength];
-        var aesKey = NaiveKey.Derive("correct-key");
+        var aesKey = Hkdf.DeriveLicenseFileKey("correct-key");
         var (ciphertext, tag) = AesGcmCipher.Seal(aesKey, nonce, plaintext);
         var payload = new byte[nonce.Length + ciphertext.Length + tag.Length];
         Buffer.BlockCopy(nonce, 0, payload, 0, nonce.Length);
         Buffer.BlockCopy(ciphertext, 0, payload, nonce.Length, ciphertext.Length);
         Buffer.BlockCopy(tag, 0, payload, nonce.Length + ciphertext.Length, tag.Length);
         var enc = Convert.ToBase64String(payload);
-        var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519");
+        var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519+v2");
 
         var licenseFile = LicenseFile.Parse(pem);
         Assert.Throws<SignatureVerificationException>(() => licenseFile.VerifyAndDecrypt(publicKey, "wrong-key"));
+    }
+
+    // ── Format v2: expiry inside the signature ───────────────────────────────
+
+    private const long Exp = 1_767_229_200;
+
+    [Fact]
+    public void AnExpiredFileIsRefusedEvenThoughItsSignatureIsValid()
+    {
+        // The whole point of v2. In v1 the requested TTL lived only in the JSON:API envelope
+        // around the certificate, so a 24-hour trial file stayed cryptographically valid forever
+        // and the client — which is the attacker — simply kept the PEM.
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var enc = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "K", Exp)));
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519+v2");
+
+        var licenseFile = LicenseFile.Parse(pem);
+        var ex = Assert.Throws<LicenseFileExpiredException>(
+            () => licenseFile.VerifyAndDecrypt(publicKey, "K", Exp + 3600));
+        Assert.Equal(Exp, ex.ExpiresAt);
+    }
+
+    [Fact]
+    public void AFileWithinItsTtlVerifies()
+    {
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var enc = Convert.ToBase64String(
+            Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "K", Exp)));
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519+v2");
+
+        var (_license, claims) = LicenseFile.Parse(pem).VerifyWithClaims(publicKey, "K", Exp - 3600);
+        Assert.Equal(Exp, claims.ExpiresAt);
+        Assert.Equal("test-jti", claims.Id);
+        Assert.Equal("test-kid", claims.KeyId);
+    }
+
+    [Fact]
+    public void AFileWithoutAnExpClaimNeverExpires()
+    {
+        // Checkout without a `ttl` produces no `exp`. That must read as perpetual, not as
+        // "expired at the epoch".
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "K")));
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519+v2");
+
+        var (_license, claims) = LicenseFile.Parse(pem)
+            .VerifyWithClaims(publicKey, "K", long.MaxValue / 2);
+        Assert.Null(claims.ExpiresAt);
+    }
+
+    [Fact]
+    public void AV1AlgIsRefusedOutright()
+    {
+        // Accepting both formats would hand back the permanent-file problem: any certificate
+        // issued before v2 could be kept and reused forever.
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "K")));
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519");
+
+        Assert.Throws<UnsupportedAlgorithmException>(
+            () => LicenseFile.Parse(pem).VerifyAndDecrypt(publicKey, "K"));
+    }
+
+    [Fact]
+    public void AV1PayloadWithoutMetaIsRefused()
+    {
+        // Second line behind the alg gate: a file must not reach the expiry check with nothing to
+        // check.
+        var (publicKey, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var v1Payload = new JsonObject
+        {
+            ["data"] = new JsonObject
+            {
+                ["type"] = "licenses",
+                ["id"] = Guid.NewGuid().ToString(),
+                ["attributes"] = new JsonObject { ["key"] = "K" },
+            },
+        }.ToJsonString();
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(v1Payload));
+        var pem = BuildValidPem(privateKey, enc, "base64+ed25519+v2");
+
+        var ex = Assert.Throws<OfflineFileFormatException>(
+            () => LicenseFile.Parse(pem).VerifyAndDecrypt(publicKey, "K"));
+        Assert.Contains("pre-v2", ex.Message, StringComparison.Ordinal);
     }
 }
