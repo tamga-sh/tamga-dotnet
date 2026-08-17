@@ -28,9 +28,9 @@ using var client = new TamgaClient(new TamgaClientOptions
 
 try
 {
-    // ttl/expiry returned alongside the certificate are metadata only — NOT embedded in the
-    // signed payload and NOT re-checked server-side later. This sample doesn't persist the file,
-    // but a real offline-capable client should record `ttl`/`expiry` itself and enforce it.
+    // The ttl/expiry returned alongside the certificate are unsigned envelope metadata. The
+    // expiry that binds is the `exp` claim inside the signed v2 payload, which VerifyAndDecrypt
+    // below enforces for you (60s clock-skew tolerance) by throwing LicenseFileExpiredException.
     var licenseFile = await client.CheckOutLicenseAsync(licenseId, encrypt: encrypt, ttl: 3600);
 
     var publicKey = Convert.FromBase64String(publicKeyBase64);
@@ -54,5 +54,12 @@ catch (TamgaApiException ex)
 catch (SignatureVerificationException ex)
 {
     Console.Error.WriteLine($"License file failed verification — treat as untrusted: {ex.Message}");
+    return 1;
+}
+catch (LicenseFileExpiredException ex)
+{
+    // An authentic file that has simply run out — distinct from a forgery on purpose, so this
+    // prompts a renewal/re-checkout rather than a tampering warning.
+    Console.Error.WriteLine($"License file expired at unix {ex.ExpiresAt} — check out a fresh one.");
     return 1;
 }

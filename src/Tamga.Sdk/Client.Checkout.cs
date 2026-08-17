@@ -42,9 +42,11 @@ public sealed record CheckoutFileAttributes
     public string[]? Includes { get; init; }
 
     /// <summary>
-    /// GOTCHA: metadata only — NOT embedded in the signed payload and NOT re-checked server-side
-    /// on later validation. Offline-file expiry enforcement is entirely this SDK's client-side
-    /// responsibility.
+    /// GOTCHA: envelope metadata only — this field is not signed and is not re-checked
+    /// server-side on later validation. For a <c>.lic</c> file the binding expiry is the
+    /// <c>exp</c> claim inside the signed payload, enforced by
+    /// <see cref="Checkout.LicenseFile.VerifyWithClaims"/>; treat this value as a display/planning
+    /// hint, not a control.
     /// </summary>
     [JsonPropertyName("ttl")]
     public int? Ttl { get; init; }
@@ -69,8 +71,9 @@ public sealed partial class TamgaClient
     // LicenseNotEncryptedException via TamgaErrorMapper).
     //
     // This SDK uses the POST .../actions/check-out variant (JSON:API `license-files` resource)
-    // rather than the raw-octet-stream GET variant, since the POST response also carries
-    // ttl/expiry/issued metadata this SDK needs for client-side offline-expiry enforcement.
+    // rather than the raw-octet-stream GET variant, since the POST response also carries the
+    // ttl/expiry/issued envelope metadata. That metadata is unsigned and advisory — the expiry
+    // that is actually enforced is the `exp` claim inside the signed v2 payload (LicenseFile).
     // ---------------------------------------------------------------
 
     /// <summary>
