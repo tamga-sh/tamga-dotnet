@@ -320,7 +320,7 @@ internal static class PemEnvelope
         // markers "overlap"). Without this guard the slice below computes a negative length and
         // throws an untyped ArgumentOutOfRangeException instead of the documented
         // OfflineFileFormatException, breaking callers that only catch the latter for untrusted
-        // .lic/.machine input. Found in security review — see plan §E checkbox note.
+        // .lic/.machine input. Found in security review.
         if (trimmed.Length < beginMarker.Length + endMarker.Length)
         {
             throw new OfflineFileFormatException($"Body between '{beginMarker}' and '{endMarker}' is malformed or too short.");

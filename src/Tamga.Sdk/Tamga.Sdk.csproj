@@ -30,7 +30,7 @@
     <!--
       MinVer (below) derives the package version from the git tag at pack
       time. There is deliberately no <Version> here to hand-bump — see
-      CLAUDE.md "Versioning & Release" and docs/plans/tamga-dotnet.plan.md §6.
+      CLAUDE.md "Versioning & Release".
     -->
     <MinVerTagPrefix>v</MinVerTagPrefix>
   </PropertyGroup>

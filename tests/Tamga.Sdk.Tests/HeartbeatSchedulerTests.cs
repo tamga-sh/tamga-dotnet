@@ -20,7 +20,7 @@ public class HeartbeatSchedulerTests
     public void HeartbeatScheduler_DefaultInterval_IsWellInsideThe600sWindow()
     {
         Assert.True(HeartbeatScheduler.DefaultInterval < TimeSpan.FromSeconds(HeartbeatScheduler.ServerHeartbeatWindowSeconds));
-        // "well inside" — at most half the window, per the ~1/3 guidance in the plan.
+        // "well inside" — at most half the window; the documented default targets ~1/3 of it.
         Assert.True(HeartbeatScheduler.DefaultInterval <= TimeSpan.FromSeconds(HeartbeatScheduler.ServerHeartbeatWindowSeconds / 2.0));
     }
 

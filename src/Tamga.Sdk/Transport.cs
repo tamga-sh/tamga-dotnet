@@ -88,10 +88,10 @@ public abstract record AuthTransport
     /// <summary><c>?auth=&lt;token&gt;</c> query parameter fallback.</summary>
     public sealed record QueryAuth(string Token) : AuthTransport;
 
-    // GOTCHA (docs/sdk.md §1): every issued token gets the `tok-` prefix regardless of the
-    // documented tok-/prod-/env-/activ-/lic- intent. This SDK deliberately never parses a token's
-    // prefix for type detection anywhere — Bearer/BasicToken/QueryToken all treat their `Token`
-    // value as an opaque string.
+    // GOTCHA (Tamga API protocol specification §1): every issued token gets the `tok-` prefix
+    // regardless of the documented tok-/prod-/env-/activ-/lic- intent. This SDK deliberately
+    // never parses a token's prefix for type detection anywhere — Bearer/BasicToken/QueryToken
+    // all treat their `Token` value as an opaque string.
 }
 
 /// <summary>Alphanumeric + <c>.</c>/<c>-</c> sanitization for the <c>Tamga-Version</c> header, max 32 chars.</summary>
@@ -374,7 +374,8 @@ public sealed class TamgaTransport
         }
 
         // GOTCHA: do NOT add a Tamga-Environment request header here — it's an unimplemented,
-        // planned EE feature with no server-side read path (docs/sdk.md gap #7).
+        // planned EE feature with no server-side read path (Tamga API protocol specification
+        // gap #7).
 
         return await SendWithRetryAsync(request, method, path, jsonBody, mediaType, cancellationToken)
             .ConfigureAwait(false);

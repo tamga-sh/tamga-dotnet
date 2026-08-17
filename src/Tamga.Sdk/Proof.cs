@@ -39,14 +39,12 @@ public sealed record GenerateOfflineProofRequest
 /// <c>meta.proof</c> has the shape <c>"v1x0.&lt;base64 signature&gt;"</c> — <see cref="Parse"/>
 /// splits the version prefix from the signature and rejects malformed/missing-prefix strings.
 ///
-/// CRITICAL — canonical payload field order: the plan's literal wording describes the signed
-/// payload as <c>{"account":{"id":...},"machine":{"id":...,"fingerprint":...},"dataset":...}</c>
-/// in that literal source-code order. **That wording is WRONG and has been corrected here** after
-/// reading the actual server source
-/// (<c>tamga-api/src/features/machines/generate_offline_proof.rs</c>): the server builds this
+/// CRITICAL — canonical payload field order: it is tempting to assume the signed payload is
+/// <c>{"account":{"id":...},"machine":{"id":...,"fingerprint":...},"dataset":...}</c>
+/// in that literal source-code order. **That assumption is WRONG**: the server builds this
 /// payload with <c>serde_json::json!(...)</c>, which constructs a <c>serde_json::Value</c>. Its
 /// backing <c>serde_json::Map</c> is <c>BTreeMap</c>-backed (the <c>preserve_order</c>/
-/// <c>indexmap</c> Cargo feature is enabled on neither <c>tamga-api</c> nor <c>tamga-rust</c> —
+/// <c>indexmap</c> Cargo feature is enabled on neither the server nor the Rust SDK —
 /// confirmed via <c>cargo tree</c>), so the actual wire bytes are recursively
 /// **alphabetically key-sorted at every nesting level**, not literal source order:
 /// <c>{"account":{"id":...},"dataset":{...sorted...},"machine":{"fingerprint":...,"id":...}}</c>
@@ -54,7 +52,7 @@ public sealed record GenerateOfflineProofRequest
 /// <c>fingerprint</c> sorts before <c>id</c>. This applies recursively to whatever keys the
 /// caller's own <c>dataset</c> object contains too. <see cref="BuildSignedPayload"/> implements
 /// this via a canonical (alphabetical, recursive) JSON writer rather than a fixed-property-order
-/// DTO — see <c>docs/plans/tamga-dotnet.plan.md</c> §H's checkbox note for this deviation.
+/// DTO.
 /// </remarks>
 public sealed class MachineProof
 {
