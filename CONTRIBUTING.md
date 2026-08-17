@@ -58,9 +58,9 @@ Run the same checks CI runs, in this order:
   `Client.*.cs`) is the single public entry point for every endpoint — do
   not introduce a `Services/`/`Handlers/` layer. `Models/` holds wire-shape
   types only. `Crypto/` holds algorithm-only primitives — never derive keys
-  there; key derivation lives in `Crypto/NaiveKey.cs`/`Crypto/Hkdf.cs`.
-  `Checkout/` composes `Crypto/` + `Models/` into the two offline-file
-  formats.
+  there; key derivation lives in `Crypto/Hkdf.cs`, the single derivation
+  path for both offline file formats. `Checkout/` composes `Crypto/` +
+  `Models/` into the two offline-file formats.
 
 ## Security-sensitive sections
 

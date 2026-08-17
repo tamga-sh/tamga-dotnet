@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`tamga-dotnet` is the official .NET SDK for Tamga (license activation, offline verification, machine management for C#/.NET applications). It is one of the five hand-written, idiomatic, standalone Tamga SDKs — it reimplements every cryptographic verification primitive natively in C# rather than binding to `tamga-c`'s Rust-backed C ABI, so divergence from the Rust reference implementation in the crypto sections is a real interop bug, not a style choice. Full implementation plan: [`../docs/plans/tamga-dotnet.plan.md`](../docs/plans/tamga-dotnet.plan.md) (lives one directory up, in the sibling `tamga-sdk` monorepo, not inside this repo). Authoritative protocol spec (source of truth for every field name, endpoint path, and enum value — read its "Known Server-Side Gaps" section before touching anything): [`tamga-api/docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md).
+`tamga-dotnet` is the official .NET SDK for Tamga (license activation, offline verification, machine management for C#/.NET applications). It is one of the eight hand-written, idiomatic, standalone Tamga SDKs — it reimplements every cryptographic verification primitive natively in C# rather than binding to `tamga-c`'s Rust-backed C ABI, so divergence from the Rust reference implementation in the crypto sections is a real interop bug, not a style choice. Full implementation plan: [`../docs/plans/tamga-dotnet.plan.md`](../docs/plans/tamga-dotnet.plan.md) (lives one directory up, in the sibling `tamga-sdk` monorepo, not inside this repo). Authoritative protocol spec (source of truth for every field name, endpoint path, and enum value — read its "Known Server-Side Gaps" section before touching anything): [`tamga-api/docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md).
 
-**Current status: fully implemented and published.** Every section (A–M) is real, tested code — client/transport, license validation/check-in/checkout, machine checkout/management/offline proof, components/processes, entitlements, error model, and CI/release automation. Published on NuGet as `Tamga.Sdk` (v1.0.3) via Trusted Publishing (OIDC). Sections E, F, H (`Checkout/LicenseFile.cs`, `Checkout/MachineFile.cs`, `Proof.cs`) have each passed a dedicated `security-reviewer` pass — see "Security-reviewer history" under Critical Dependency Notes below for the specific findings, since they aren't otherwise surfaced anywhere outside commit message bodies. Check the plan's checkbox state for exact per-item status before assuming a specific method or field is done.
+**Current status: fully implemented and published.** Every section (A–M) is real, tested code — client/transport, license validation/check-in/checkout, machine checkout/management/offline proof, components/processes, entitlements, error model, and CI/release automation. Published on NuGet as `Tamga.Sdk` via Trusted Publishing (OIDC); the exact published version is whatever the newest `v*` git tag says, since MinVer derives it at pack time. Sections E, F, H (`Checkout/LicenseFile.cs`, `Checkout/MachineFile.cs`, `Proof.cs`) have each passed a dedicated `security-reviewer` pass — see "Security-reviewer history" under Critical Dependency Notes below for the specific findings, since they aren't otherwise surfaced anywhere outside commit message bodies. Check the plan's checkbox state for exact per-item status before assuming a specific method or field is done.
 
 ## Architecture
 
@@ -34,10 +34,9 @@ tamga-dotnet/
 │   │   ├── Rsa.cs                     — BCL RSA (PKCS1v15 + PSS)
 │   │   ├── Ecdsa.cs                   — BCL ECDsa (P-256)
 │   │   ├── AesGcm.cs                  — BCL AesGcm
-│   │   ├── Hkdf.cs                    — BCL HKDF-SHA256
-│   │   └── NaiveKey.cs                — license-checkout's non-KDF key derivation
+│   │   └── Hkdf.cs                    — BCL HKDF-SHA256; both offline-file key derivations
 │   └── Checkout/
-│       ├── LicenseFile.cs             — .lic parse/verify/decrypt — Ed25519-only, naive AES key
+│       ├── LicenseFile.cs             — .lic parse/verify/decrypt — Ed25519-only, HKDF AES key, format v2
 │       └── MachineFile.cs             — .machine parse/verify/decrypt — multi-algorithm, HKDF key
 │
 ├── tests/Tamga.Sdk.Tests/             — xUnit, mirrors src/ 1:1 (one *Tests.cs per src file)
@@ -47,9 +46,9 @@ tamga-dotnet/
     └── release.yml                    — release-please + MinVer + dotnet pack/push
 ```
 
-Not yet scaffolded (deferred to when Section B–M work starts): `Models/Component.cs`, `Models/Process.cs`, `Models/Entitlement.cs`, `samples/`, `CONTRIBUTING.md`. See the plan for their intended shape.
+The tree above is abridged: `Models/` also holds `Component.cs`, `Process.cs` and `Entitlement.cs`, `Client.cs` has `Client.*.cs` partial-class siblings, and `samples/` holds five runnable console programs.
 
-**Vertical structure, not horizontal.** `Client.cs` is the single public entry point for every endpoint — do not introduce a `Services/`/`Handlers/` layer. `Models/` holds wire-shape types only; `Crypto/` holds algorithm-only primitives (never derive keys there — key derivation lives in `NaiveKey.cs`/`Hkdf.cs`); `Checkout/` composes `Crypto/` + `Models/` into the two offline-file formats.
+**Vertical structure, not horizontal.** `Client.cs` is the single public entry point for every endpoint — do not introduce a `Services/`/`Handlers/` layer. `Models/` holds wire-shape types only; `Crypto/` holds algorithm-only primitives (never derive keys there — key derivation lives in `Hkdf.cs`, the single path for both offline file formats); `Checkout/` composes `Crypto/` + `Models/` into the two offline-file formats.
 
 ## Dev Commands
 
@@ -68,9 +67,9 @@ There is no `just`/`make` wrapper in this repo (unlike `tamga-api`) — these ar
 
 Pulled from `tamga-api/docs/sdk.md`'s "Known Server-Side Gaps" section, scoped to what actually affects this repo. Do not "fix" any of these by making the SDK behave as if the gap were closed — model the real, current server behavior.
 
-- **Auth is not enforced on license or machine endpoints server-side today** (gap #3). `Transport.cs` must still always send `Authorization: License <key>` (and the other 4 transports where applicable) — this is forward-compatible for when enforcement lands, not a no-op. Do not skip sending credentials just because the server currently ignores them.
+- **Auth is not enforced on license or machine endpoints server-side today** (gap #3). `Transport.cs` must still always send `Authorization: License <key>` (and the other 7 transports where applicable) — this is forward-compatible for when enforcement lands, not a no-op. Do not skip sending credentials just because the server currently ignores them.
 - **Only 14 of 24 `ValidationCode` values are reachable** (gap #4). `Models/ValidationCode.cs` models all 24 with lenient unknown-value decoding, but do not build product UX (retry logic, user-facing messaging, etc.) around the 10 that are declared-but-never-emitted (`BANNED`, `ENTITLEMENTS_MISSING`, `TOO_MANY_USERS`, `HEARTBEAT_DEAD`, `HEARTBEAT_NOT_STARTED`, `FINGERPRINT_SCOPE_MISMATCH`, `COMPONENTS_SCOPE_MISMATCH`, `CHECKSUM_SCOPE_MISMATCH`, `VERSION_SCOPE_MISMATCH`) or `NOT_FOUND` (the handler returns HTTP 404 directly instead — this code never actually appears in a response body).
-- **No in-app rate limiting exists** (gap #5). `429 TOO_MANY_REQUESTS` is declared in the server's error enum but has no constructor and is never returned. Do **not** implement client-side 429/backoff handling in `Errors.cs` — there's nothing on the wire to react to, and doing so would be dead code with no test fixture to validate against.
+- **`429 TOO_MANY_REQUESTS` is live and handled.** `Transport.cs` parses and caps `Retry-After`, backs off exponentially with jitter, and auto-retries `GET` plus the five safe `POST` actions (`validate`, `validate-key`, `check-in`, `check-out`, `ping`) — creates are deliberately excluded so a retry cannot burn a second seat. Retry budget is `TamgaClientOptions.MaxRetries` (default 3). `Errors.cs` deliberately has no typed `429` exception: once the budget is exhausted it surfaces as the catch-all `TamgaApiException`. What does **not** exist is `X-RateLimit-*` response-header parsing — those headers appear in the server's CORS allowlist but are never actually set on a response.
 - **`Tamga-Environment` request header is not implemented server-side** (gap #7) — it's a planned EE feature with no code path reading it yet. `Transport.cs` must not send it. This is different from `Tamga-Version`/`Tamga-OTP`, which the server does read.
 - **`heartbeat_status` and dead-machine culling ignore `policy.heartbeat_duration`** (gap #8) — both use a hardcoded 600-second window regardless of the policy value. Do not read `policy.heartbeat_duration` client-side and use it to compute a heartbeat interval; `HeartbeatScheduler` (in `Client.cs`, §G of the plan) must default to ~1/3 of the hardcoded 600s, not a policy-derived value.
 - **Fresh policies return non-real enum strings** (gap #9): `overage_strategy: "DENY_ACCESS"` and `heartbeat_resurrection_strategy: "NO_RESURRECTION"` are not real `OverageStrategy`/`HeartbeatResurrectionStrategy` variants — the server silently treats them as `NO_OVERAGE`/`NO_REVIVE`. `Models/Policy.cs`'s custom `JsonConverter`s for both enums must decode these two strings to `NoOverage`/`NoRevive` without throwing, and must **not** invent a fake `DenyAccess`/`NoResurrection` C# member that implies restrictive behavior the server doesn't actually apply.
@@ -88,7 +87,7 @@ Pulled from `tamga-api/docs/sdk.md`'s "Known Server-Side Gaps" section, scoped t
     /p:Threshold=80 /p:ThresholdType=line /p:ThresholdStat=total
   ```
 - CI matrix is `ubuntu-latest` / `macos-latest` / `windows-latest`. This matters more here than in most repos: `AesGcm` and Ed25519 (via `NSec.Cryptography`/libsodium) are OS-crypto-backend-sensitive (OpenSSL on Linux, CNG on Windows, CommonCrypto on macOS, libsodium's own bundled backend for Ed25519). A crypto test that only runs on the author's laptop is not sufficient signal — every test in `Crypto/`/`Checkout/` must pass identically on all three OSes before merging.
-- No live-network HTTP calls in tests — use a mocked `HttpMessageHandler` (`tests/Tamga.Sdk.Tests/Support/MockHttpMessageHandler.cs`, not yet created) once `Transport.cs` has real logic.
+- No live-network HTTP calls in tests — use a mocked `HttpMessageHandler` (`tests/Tamga.Sdk.Tests/Support/MockHttpMessageHandler.cs`).
 - Sections **E, F, H** (`Checkout/LicenseFile.cs`, `Checkout/MachineFile.cs`, `Proof.cs`) additionally require a mandatory `security-reviewer` pass before merge — this is a CRITICAL-severity gate per the org's code-review rule, not optional per reviewer discretion. A subtle bug in these three files (base64-string-vs-decoded-bytes confusion, wrong verifier picked for a scheme, non-deterministic field ordering breaking a signature check, a key derivation that silently isn't the one the server used) is a silent license-verification bypass, not just a functional bug.
 
 ## Critical Dependency Notes
