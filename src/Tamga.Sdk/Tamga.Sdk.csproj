@@ -16,11 +16,16 @@
   <PropertyGroup Label="NuGet package metadata">
     <PackageId>Tamga.Sdk</PackageId>
     <Authors>Tamga</Authors>
-    <Description>Official .NET SDK for Tamga. Integrate license activation, offline verification, and machine management into your C#/.NET applications.</Description>
+    <Description>Official .NET SDK for Tamga. Integrate license activation, offline verification, and machine management into your .NET applications.</Description>
     <RepositoryUrl>https://github.com/tamga-sh/tamga-dotnet</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageTags>tamga;licensing;license;activation;dotnet;sdk</PackageTags>
+    <!--
+      Canonical keyword set, identical across every Tamga SDK. Keep these five
+      in this order and do not append per-language extras — the whole point is
+      that a search hits the fleet uniformly.
+    -->
+    <PackageTags>licensing;software-licensing;license-key;activation;entitlements</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <!--
       MinVer (below) derives the package version from the git tag at pack
