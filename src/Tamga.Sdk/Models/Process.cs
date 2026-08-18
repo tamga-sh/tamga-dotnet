@@ -47,8 +47,9 @@ public sealed record Process
 /// <summary>
 /// Request body for <c>POST /processes</c>. Flat, not JSON:API-enveloped.
 /// <see cref="Pid"/> is deliberately <see cref="string"/> — see <see cref="Process.Pid"/>'s remarks.
-/// It accepts an <see cref="int"/> at the call site (see <c>TamgaClient.CreateProcessAsync</c>)
-/// purely for caller convenience, but always serializes as a JSON string.
+/// <c>TamgaClient.CreateProcessAsync</c> takes a <see cref="string"/> too, rather than accepting an
+/// <see cref="int"/> for convenience: an implicit numeric-to-string conversion at the call site is
+/// exactly the coercion this type exists to prevent.
 /// </summary>
 public sealed record CreateProcessRequest
 {

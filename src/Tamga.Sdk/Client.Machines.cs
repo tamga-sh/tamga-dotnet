@@ -106,10 +106,11 @@ public sealed partial class TamgaClient
 /// Periodic heartbeat pinger for a single machine, built on <see cref="PeriodicTimer"/>. Pings on
 /// an interval set to ~1/3 of the server's hardcoded 600s heartbeat window
 /// (<see cref="DefaultInterval"/>) — GOTCHA: this is deliberately NOT derived from
-/// <c>policy.heartbeat_duration</c>, which the server ignores for this purpose (docs/sdk.md gap
-/// #8). Raises <see cref="Dead"/> when a ping observes <see cref="HeartbeatStatus.Dead"/> — per
-/// the protocol reference, this means the machine was likely deleted/culled server-side; callers
-/// should re-activate rather than keep retrying the ping.
+/// <c>policy.heartbeat_duration</c>, which the server ignores for this purpose (Tamga API
+/// protocol specification gap #8). Raises <see cref="Dead"/> when a ping observes
+/// <see cref="HeartbeatStatus.Dead"/> — per the protocol reference, this means the machine was
+/// likely deleted/culled server-side; callers should re-activate rather than keep retrying the
+/// ping.
 /// </summary>
 public sealed class HeartbeatScheduler : IAsyncDisposable
 {

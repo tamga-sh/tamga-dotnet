@@ -5,9 +5,8 @@ namespace Tamga.Sdk.Crypto;
 /// <summary>
 /// AES-256-GCM open/seal wrapper over BCL <see cref="System.Security.Cryptography.AesGcm"/> — no
 /// third-party dependency needed (available since .NET Core 3.0). Algorithm-only: never derives
-/// the AES key itself. See <see cref="Hkdf"/> for both derivations
-/// (machine checkout) for the two distinct, non-interchangeable key-derivation paths that feed
-/// this type.
+/// the AES key itself. See <see cref="Hkdf"/> for the two distinct, non-interchangeable
+/// key-derivation paths (license checkout and machine checkout) that feed this type.
 /// </summary>
 public static class AesGcmCipher
 {

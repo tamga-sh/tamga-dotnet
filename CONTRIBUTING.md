@@ -58,15 +58,14 @@ Run the same checks CI runs, in this order:
   `Client.*.cs`) is the single public entry point for every endpoint — do
   not introduce a `Services/`/`Handlers/` layer. `Models/` holds wire-shape
   types only. `Crypto/` holds algorithm-only primitives — never derive keys
-  there; key derivation lives in `Crypto/NaiveKey.cs`/`Crypto/Hkdf.cs`.
-  `Checkout/` composes `Crypto/` + `Models/` into the two offline-file
-  formats.
+  there; key derivation lives in `Crypto/Hkdf.cs`, the single derivation
+  path for both offline file formats. `Checkout/` composes `Crypto/` +
+  `Models/` into the two offline-file formats.
 
 ## Security-sensitive sections
 
-Changes to `Crypto/`, `Checkout/`, or `Proof.cs` (plan sections E, F, H)
-require a mandatory `security-reviewer` pass before merge — see
-`docs/plans/tamga-dotnet.plan.md` §4 Quality Gates and `CLAUDE.md`
+Changes to `Crypto/`, `Checkout/`, or `Proof.cs` (sections E, F, H)
+require a mandatory `security-reviewer` pass before merge — see `CLAUDE.md`
 "Testing". A subtle bug in these files (base64-string-vs-decoded-bytes
 confusion, wrong verifier picked for a scheme, non-deterministic field
 ordering breaking a signature check, a key derivation that silently isn't
@@ -78,14 +77,14 @@ a functional bug — treat findings in these files as CRITICAL severity.
 When this repo's own docs disagree with the running server, in order of
 authority:
 
-1. `tamga-api` source (`src/features/...`) — the actual running server.
-2. `tamga-api/docs/sdk.md` — generated from the server, not from plans.
-3. `docs/plans/tamga-dotnet.plan.md` — written before implementation; can
-   be wrong or incomplete about exact field names/signatures.
+1. The observed behavior of the running Tamga API server.
+2. The Tamga API protocol specification — generated from the server.
+3. This repo's own docs and code comments — they can be wrong or
+   incomplete about exact field names/signatures.
 
-If you find a plan/spec discrepancy while implementing something, fix the
-code to match ground truth, and add an inline note next to the relevant
-plan checkbox explaining the deviation — don't silently diverge.
+If you find a discrepancy while implementing something, fix the code to
+match ground truth and add an inline note explaining the deviation — don't
+silently diverge.
 
 ## Commit convention
 

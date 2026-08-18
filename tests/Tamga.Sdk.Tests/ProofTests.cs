@@ -40,8 +40,8 @@ public class ProofTests
         var datasetPos = json.IndexOf("\"dataset\"", StringComparison.Ordinal);
         var machinePos = json.IndexOf("\"machine\"", StringComparison.Ordinal);
 
-        // account, dataset, machine (alphabetical) — NOT account, machine, dataset (the plan's
-        // original literal-source-order wording, which is wrong; see Proof.cs remarks).
+        // account, dataset, machine (alphabetical) — NOT account, machine, dataset, which is the
+        // literal source order and is wrong on the wire; see Proof.cs remarks.
         Assert.True(accountPos < datasetPos, json);
         Assert.True(datasetPos < machinePos, json);
     }

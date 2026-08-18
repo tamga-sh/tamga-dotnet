@@ -53,13 +53,18 @@ public sealed record LicenseFileCertificate
 /// broken) or, worse, a bug that skips verification silently accepts forged files. See the
 /// <c>// CRITICAL:</c> comment at the call site in <see cref="Verify"/>.
 ///
+/// Format v2 is mandatory: <c>alg</c> must end in <c>+v2</c> and the payload must carry the signed
+/// <c>meta</c> claims (<c>iat</c>/<c>exp</c>/<c>jti</c>/<c>kid</c>, see
+/// <see cref="LicenseFileClaims"/>). A pre-v2 file is rejected outright with no fallback path —
+/// see <see cref="VerifyWithClaims"/>.
+///
 /// GOTCHA: <c>includes</c> is always <c>[]</c> server-side — this SDK does not model an
 /// "embedded relationships via checkout" feature. GOTCHA: checkout <c>id</c> is a fresh UUIDv7 per
-/// call, not idempotent. GOTCHA: <c>ttl</c>/<c>expiry</c> (returned alongside the certificate by
-/// the JSON:API checkout response, not carried inside the file itself) are metadata-only, NOT
-/// embedded in the signed payload and NOT re-checked server-side on later validation — expiry
-/// enforcement for an offline file is entirely this SDK's client-side responsibility. GOTCHA: the
-/// server returns <c>422 LICENSE_NOT_ENCRYPTED</c> when the license has no <c>key</c> set and
+/// call, not idempotent. GOTCHA: the <c>ttl</c>/<c>expiry</c> fields returned alongside the
+/// certificate in the JSON:API checkout response are envelope metadata only — they are not signed
+/// and not re-checked server-side on later validation. The expiry that actually binds is the
+/// <c>exp</c> claim inside the signed payload, which this type enforces on every verify. GOTCHA:
+/// the server returns <c>422 LICENSE_NOT_ENCRYPTED</c> when the license has no <c>key</c> set and
 /// <c>encrypt=true</c> is requested.
 /// </remarks>
 public sealed class LicenseFile
@@ -134,19 +139,24 @@ public sealed class LicenseFile
     }
 
     /// <summary>
-    /// Full verify pipeline: verifies the Ed25519 signature (fails closed), then decrypts (if
-    /// <c>alg</c> indicates AES-256-GCM) or plain-decodes the <c>enc</c> payload, and parses the
-    /// embedded <c>{"data": &lt;LicenseResource&gt;}</c> JSON into a <see cref="License"/>.
+    /// Full verify pipeline: verifies the Ed25519 signature (fails closed), rejects anything that
+    /// is not format v2, decrypts (if <c>alg</c> indicates AES-256-GCM) or plain-decodes the
+    /// <c>enc</c> payload, enforces the signed <c>exp</c> claim, and parses the embedded
+    /// <c>{"data": &lt;LicenseResource&gt;, "meta": &lt;claims&gt;}</c> JSON into a
+    /// <see cref="License"/>. Uses the local clock; the overload taking
+    /// <c>nowUnixSeconds</c> lets a caller supply a trusted timestamp instead.
     /// </summary>
     /// <param name="publicKey">The account's raw 32-byte Ed25519 public key.</param>
     /// <param name="licenseKey">
-    /// The license key, used to derive the AES-256-GCM key (via <see cref="Hkdf"/>) for an
-    /// encrypted file. Ignored for a plain (unencrypted) file, but still required by this method's
-    /// signature for a uniform call shape across both cases.
+    /// The license key, used to derive the AES-256-GCM key (via
+    /// <see cref="Hkdf.DeriveLicenseFileKey"/>) for an encrypted file. Ignored for a plain
+    /// (unencrypted) file, but still required by this method's signature for a uniform call shape
+    /// across both cases.
     /// </param>
-    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted.</exception>
-    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> is not a recognized value.</exception>
-    /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape.</exception>
+    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted — or decryption failed its authentication tag.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> is not a recognized value, or does not end in <c>+v2</c> (a pre-v2 file).</exception>
+    /// <exception cref="LicenseFileExpiredException">The signature verified but the signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
+    /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape, or carries no signed <c>meta</c> claims.</exception>
     public License VerifyAndDecrypt(ReadOnlySpan<byte> publicKey, string licenseKey)
         => VerifyAndDecrypt(publicKey, licenseKey, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
@@ -167,6 +177,14 @@ public sealed class LicenseFile
     /// claims. Use this for <c>jti</c> replay detection or <c>kid</c> key-rotation bookkeeping.
     /// Expiry is enforced either way — it is not opt-in.
     /// </summary>
+    /// <param name="publicKey">The account's raw 32-byte Ed25519 public key.</param>
+    /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
+    /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
+    /// <returns>The license carried by the file, together with the claims that were inside the signed bytes.</returns>
+    /// <exception cref="SignatureVerificationException">Signature verification or payload decryption failed.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> is unrecognized or pre-v2.</exception>
+    /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
+    /// <exception cref="OfflineFileFormatException">The payload is malformed or carries no signed <c>meta</c> claims.</exception>
     public (License License, LicenseFileClaims Claims) VerifyWithClaims(
         ReadOnlySpan<byte> publicKey,
         string licenseKey,
@@ -302,7 +320,7 @@ internal static class PemEnvelope
         // markers "overlap"). Without this guard the slice below computes a negative length and
         // throws an untyped ArgumentOutOfRangeException instead of the documented
         // OfflineFileFormatException, breaking callers that only catch the latter for untrusted
-        // .lic/.machine input. Found in security review — see plan §E checkbox note.
+        // .lic/.machine input. Found in security review.
         if (trimmed.Length < beginMarker.Length + endMarker.Length)
         {
             throw new OfflineFileFormatException($"Body between '{beginMarker}' and '{endMarker}' is malformed or too short.");

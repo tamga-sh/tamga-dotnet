@@ -243,9 +243,13 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 /// <see cref="TamgaApiError.Code"/> only.
 /// </summary>
 /// <remarks>
-/// GOTCHA: <c>429 TOO_MANY_REQUESTS</c> is declared in the server's error enum but has no
-/// constructor and is never returned by any code path today — deliberately not mapped to a typed
-/// exception here, and no client-side 429/backoff handling exists anywhere in this SDK.
+/// <c>429 TOO_MANY_REQUESTS</c> is deliberately absent from the table below. It is a real,
+/// returned status, but it is absorbed one layer down: <see cref="TamgaTransport"/> retries a
+/// rate-limited request with capped <c>Retry-After</c>/jittered backoff, so by the time an error
+/// reaches this mapper the retry budget (<see cref="TamgaClientOptions.MaxRetries"/>) is already
+/// spent and a distinct exception type would only tell the caller something it can no longer act
+/// on. It surfaces as the catch-all <see cref="TamgaApiException"/> with
+/// <see cref="TamgaApiError.Status"/> <c>429</c> intact.
 /// </remarks>
 public static class TamgaErrorMapper
 {

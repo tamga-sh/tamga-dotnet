@@ -40,7 +40,7 @@ public sealed class TamgaClientOptions
     /// </remarks>
     public int MaxRetries { get; init; } = 3;
 
-    /// <summary>Which of the 5 auth transports to use. <see langword="null"/> sends no credentials.</summary>
+    /// <summary>Which of the 8 auth transports to use. <see langword="null"/> sends no credentials.</summary>
     public AuthTransport? Auth { get; init; }
 
     /// <summary>TOTP 2FA code, sent as <c>Tamga-OTP</c> on every authenticated request when set.</summary>
@@ -48,8 +48,8 @@ public sealed class TamgaClientOptions
 }
 
 /// <summary>
-/// One of the 5 auth transports the server accepts, in the order it tries them (docs/sdk.md §1).
-/// Closed hierarchy of nested records — construct via the static factory methods.
+/// One of the 8 auth transports the server accepts, listed in the order it tries them. Closed
+/// hierarchy of nested records — construct the nested record you want directly.
 /// </summary>
 public abstract record AuthTransport
 {
@@ -88,10 +88,10 @@ public abstract record AuthTransport
     /// <summary><c>?auth=&lt;token&gt;</c> query parameter fallback.</summary>
     public sealed record QueryAuth(string Token) : AuthTransport;
 
-    // GOTCHA (docs/sdk.md §1): every issued token gets the `tok-` prefix regardless of the
-    // documented tok-/prod-/env-/activ-/lic- intent. This SDK deliberately never parses a token's
-    // prefix for type detection anywhere — Bearer/BasicToken/QueryToken all treat their `Token`
-    // value as an opaque string.
+    // GOTCHA (Tamga API protocol specification §1): every issued token gets the `tok-` prefix
+    // regardless of the documented tok-/prod-/env-/activ-/lic- intent. This SDK deliberately
+    // never parses a token's prefix for type detection anywhere — Bearer/BasicToken/QueryToken
+    // all treat their `Token` value as an opaque string.
 }
 
 /// <summary>Alphanumeric + <c>.</c>/<c>-</c> sanitization for the <c>Tamga-Version</c> header, max 32 chars.</summary>
@@ -374,7 +374,8 @@ public sealed class TamgaTransport
         }
 
         // GOTCHA: do NOT add a Tamga-Environment request header here — it's an unimplemented,
-        // planned EE feature with no server-side read path (docs/sdk.md gap #7).
+        // planned EE feature with no server-side read path (Tamga API protocol specification
+        // gap #7).
 
         return await SendWithRetryAsync(request, method, path, jsonBody, mediaType, cancellationToken)
             .ConfigureAwait(false);
@@ -392,7 +393,10 @@ public sealed class TamgaTransport
     /// <summary>How much of a <c>Retry-After</c> is honoured, in seconds.</summary>
     private const int MaxRetryAfterSeconds = 60;
 
-    /// <summary>How much clock skew is tolerated when checking exp — see LicenseFile.</summary>
+    /// <summary>
+    /// The five <c>POST</c> action suffixes that are safe to repeat after a <c>429</c> — see
+    /// <see cref="IsRetryable"/> for why these and nothing else.
+    /// </summary>
     private static readonly string[] RetryablePostSuffixes =
     [
         "/actions/validate",
@@ -625,6 +629,8 @@ public sealed class TamgaTransport
         response.Headers.TryGetValues("Tamga-Mode", out var m) ? m.FirstOrDefault() : null,
         response.Headers.TryGetValues("X-Request-Id", out var r) ? r.FirstOrDefault() : null);
 
-    // GOTCHA: no X-RateLimit-* response header parsing or 429 backoff here — declared in the
-    // CORS allowlist only, never actually set/returned by any handler (docs/sdk.md gap #5).
+    // GOTCHA: no X-RateLimit-* response header parsing here — those headers are declared in the
+    // server's CORS allowlist only, never actually set on a response by any handler, so there is
+    // nothing to read. This says nothing about 429 itself, which IS returned and IS handled: see
+    // SendWithRetryAsync/IsRetryable/RetryDelay/ParseRetryAfter above.
 }

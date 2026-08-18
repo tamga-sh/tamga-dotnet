@@ -5,9 +5,7 @@ namespace Tamga.Sdk;
 
 /// <summary>
 /// The Tamga SDK's single public entry point — one <c>Task&lt;T&gt;</c>-returning method per
-/// endpoint, every call taking a trailing <see cref="CancellationToken"/>. See
-/// <c>docs/plans/tamga-dotnet.plan.md</c> §B–K for the endpoint-by-endpoint protocol reference
-/// this class implements against.
+/// endpoint, every call taking a trailing <see cref="CancellationToken"/>.
 /// </summary>
 public sealed partial class TamgaClient : IDisposable
 {
@@ -55,8 +53,8 @@ public sealed partial class TamgaClient : IDisposable
     //
     // Auth is currently NOT enforced server-side on any of these 3 endpoints, but this SDK still
     // always sends the configured Authorization header/query — forward-compatible once
-    // enforcement lands (docs/sdk.md gap #3). Nothing special is needed here beyond what
-    // TamgaTransport already applies from TamgaClientOptions.Auth.
+    // enforcement lands (Tamga API protocol specification gap #3). Nothing special is needed here
+    // beyond what TamgaTransport already applies from TamgaClientOptions.Auth.
     // ---------------------------------------------------------------
 
     /// <summary><c>POST /licenses/actions/validate-key</c> — validates by raw license key. No scope support.</summary>
