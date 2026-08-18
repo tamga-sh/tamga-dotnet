@@ -100,13 +100,13 @@ public enum OverageStrategy
 /// <remarks>
 /// ⚠ CRITICAL: a freshly-created policy on the server can report the literal string
 /// <c>"DENY_ACCESS"</c>, which is NOT a real <see cref="OverageStrategy"/> variant — the server
-/// silently treats it as <see cref="OverageStrategy.NoOverage"/> (see gap #9 in
-/// <c>tamga-api/docs/sdk.md</c>). This converter must decode that string to
+/// silently treats it as <see cref="OverageStrategy.NoOverage"/> (see gap #9 in the Tamga API
+/// protocol specification). This converter must decode that string to
 /// <see cref="OverageStrategy.NoOverage"/> without throwing, and must NOT invent a fake
 /// <c>DenyAccess</c> member that implies restrictive behavior the server doesn't actually apply.
 /// Any other unrecognized string also falls back to <see cref="OverageStrategy.NoOverage"/>
-/// rather than throwing, matching the server's own fallback (see
-/// <c>PolicyAttributes::overage_strategy_parsed</c> in <c>tamga-api</c>).
+/// rather than throwing, matching the server's own fallback in
+/// <c>PolicyAttributes::overage_strategy_parsed</c>.
 /// </remarks>
 public sealed class OverageStrategyConverter : JsonConverter<OverageStrategy>
 {

@@ -62,9 +62,11 @@ public sealed record MachineFilePayload
 /// JWT/RS256 verification for machine files; it throws <see cref="SchemeNotSupportedException"/>
 /// immediately rather than silently no-op-ing.
 ///
-/// Encryption key derivation is HKDF-SHA256 (<see cref="Hkdf"/>) — NOT the naive zero-pad/truncate
-/// scheme used by license checkout (<see cref="NaiveKey"/>). Decryption requires BOTH the license
-/// key AND the target machine's fingerprint. GOTCHA: <c>ttl</c> is server-validated
+/// Encryption key derivation is HKDF-SHA256 (<see cref="Hkdf.DeriveMachineFileKey"/>). License
+/// checkout uses HKDF too, but with a different salt and <c>info</c>
+/// (<see cref="Hkdf.DeriveLicenseFileKey"/>), so the two keys never collide and are not
+/// interchangeable. Decryption here requires BOTH the license key AND the target machine's
+/// fingerprint. GOTCHA: <c>ttl</c> is server-validated
 /// <c>&gt; 0 &amp;&amp; &lt;= 31536000</c> (365 days) — the SDK's checkout call validates this
 /// client-side too, to fail fast, in addition to handling the server's <c>422 TTL_INVALID</c>.
 ///

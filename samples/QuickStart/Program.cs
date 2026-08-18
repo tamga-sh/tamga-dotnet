@@ -17,7 +17,7 @@ using var client = new TamgaClient(new TamgaClientOptions
     AccountId = accountId,
     BaseUrl = baseUrl,
     // License auth is the primary transport for embedded/client SDKs like this one — see the
-    // README's auth-transport matrix for the other 4 options.
+    // README's auth-transport matrix for the other 7 options.
     Auth = new AuthTransport.License(licenseKey),
 });
 
@@ -25,8 +25,8 @@ try
 {
     var result = await client.ValidateByKeyAsync(licenseKey);
 
-    // Only 14 of ValidationCode's 24 values are reachable today — see the README's "Known
-    // Server-Side Gaps" section before building UX around the rest.
+    // Only 14 of ValidationCode's 24 values are reachable today — see the README's "Known gaps"
+    // section before building UX around the rest.
     switch (result.Code)
     {
         case ValidationCode.Valid:

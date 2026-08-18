@@ -172,6 +172,25 @@ public sealed class UnsupportedAlgorithmException : Exception
 }
 
 /// <summary>
+/// Thrown when a <c>.lic</c> file's signature verified but its signed <c>exp</c> claim has
+/// passed — an authentic license file that has simply run out.
+/// </summary>
+/// <remarks>
+/// Its own type on purpose: a caller that cannot tell "expired" from "forged" either warns the
+/// user about tampering when their trial merely ended, or treats a forgery as a renewal prompt.
+/// </remarks>
+public sealed class LicenseFileExpiredException : Exception
+{
+    /// <summary>The <c>exp</c> claim, seconds since the Unix epoch.</summary>
+    public long ExpiresAt { get; }
+
+    /// <summary>Constructs the exception for a file that expired at <paramref name="expiresAt"/>.</summary>
+    public LicenseFileExpiredException(long expiresAt)
+        : base($"License file expired at unix timestamp {expiresAt}.")
+        => ExpiresAt = expiresAt;
+}
+
+/// <summary>
 /// Thrown client-side when a <c>.lic</c>/<c>.machine</c> PEM envelope or its inner JSON is
 /// malformed (missing markers, invalid base64, invalid JSON shape).
 /// </summary>
@@ -224,9 +243,13 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 /// <see cref="TamgaApiError.Code"/> only.
 /// </summary>
 /// <remarks>
-/// GOTCHA: <c>429 TOO_MANY_REQUESTS</c> is declared in the server's error enum but has no
-/// constructor and is never returned by any code path today — deliberately not mapped to a typed
-/// exception here, and no client-side 429/backoff handling exists anywhere in this SDK.
+/// <c>429 TOO_MANY_REQUESTS</c> is deliberately absent from the table below. It is a real,
+/// returned status, but it is absorbed one layer down: <see cref="TamgaTransport"/> retries a
+/// rate-limited request with capped <c>Retry-After</c>/jittered backoff, so by the time an error
+/// reaches this mapper the retry budget (<see cref="TamgaClientOptions.MaxRetries"/>) is already
+/// spent and a distinct exception type would only tell the caller something it can no longer act
+/// on. It surfaces as the catch-all <see cref="TamgaApiException"/> with
+/// <see cref="TamgaApiError.Status"/> <c>429</c> intact.
 /// </remarks>
 public static class TamgaErrorMapper
 {

@@ -73,8 +73,9 @@ public class ErrorsTests
     [Fact]
     public void ToException_DoesNotMap_TooManyRequests_ToATypedException()
     {
-        // GOTCHA regression: 429 TOO_MANY_REQUESTS is declared server-side but never returned —
-        // this SDK deliberately has no typed exception for it; it must fall back to the catch-all.
+        // 429 is real and is absorbed by TamgaTransport's retry loop, so anything reaching this
+        // mapper has already exhausted the retry budget. A typed exception here would report
+        // something the caller can no longer act on — it must fall back to the catch-all.
         var error = new TamgaApiError { Status = 429, Code = "TOO_MANY_REQUESTS", Detail = "detail" };
         var exception = TamgaErrorMapper.ToException(error);
         Assert.IsType<TamgaApiException>(exception);

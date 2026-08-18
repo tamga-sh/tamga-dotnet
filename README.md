@@ -2,15 +2,10 @@
 
 [![CI](https://github.com/tamga-sh/tamga-dotnet/actions/workflows/ci.yml/badge.svg)](https://github.com/tamga-sh/tamga-dotnet/actions/workflows/ci.yml)
 [![NuGet version](https://img.shields.io/nuget/v/Tamga.Sdk.svg)](https://www.nuget.org/packages/Tamga.Sdk)
-[![coverage](https://codecov.io/gh/tamga-sh/tamga-dotnet/branch/main/graph/badge.svg)](https://codecov.io/gh/tamga-sh/tamga-dotnet)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 Official .NET SDK for Tamga. Integrate license activation, offline
-verification, and machine management into your C#/.NET applications.
-
-> **Status: actively developed.** License validation, check-in, offline
-> license/machine file checkout + verification, machine management,
-> components/processes, and entitlements are all implemented and covered by
-> the test suite.
+verification, and machine management into your .NET applications.
 
 ## Install
 
@@ -18,11 +13,10 @@ verification, and machine management into your C#/.NET applications.
 dotnet add package Tamga.Sdk
 ```
 
-Package: [`Tamga.Sdk`](https://www.nuget.org/packages/Tamga.Sdk) on NuGet.
-Targets `net8.0` **only** for v0.1 — see [CLAUDE.md](CLAUDE.md) for why
-(Ed25519 has no BCL implementation until .NET 9), and for the
-`netstandard2.0` backlog note. Do not expect this package to install into a
-.NET Framework or older-TFM project yet.
+Targets `net8.0` only. Ed25519 has no BCL implementation before .NET 9, so
+the package takes a single non-BCL dependency, `NSec.Cryptography`
+(`src/Tamga.Sdk/Crypto/Ed25519.cs`). There is no `netstandard2.0` target, so
+the package will not install into a .NET Framework project.
 
 ## Quickstart
 
@@ -37,78 +31,243 @@ using var client = new TamgaClient(new TamgaClientOptions
     Auth = new AuthTransport.License("YOUR-LICENSE-KEY"),
 });
 
-var result = await client.ValidateByKeyAsync("YOUR-LICENSE-KEY");
+ValidationResult result = await client.ValidateByKeyAsync("YOUR-LICENSE-KEY");
 
 if (result.Code == ValidationCode.Valid)
 {
-    Console.WriteLine("License is valid.");
+    Console.WriteLine($"Valid. Uses: {result.License.Uses}.");
 }
 else
 {
-    Console.WriteLine($"License is not valid: {result.Code} — {result.Detail}");
+    Console.WriteLine($"Not valid: {result.Code} — {result.Detail}");
 }
 ```
 
-See [`samples/`](samples/) for complete, runnable programs covering
-validation, offline license-file checkout/verification, machine
-activation + heartbeats, offline proofs, and entitlements.
+Activating a machine against a license, then keeping it alive:
+
+```csharp
+using Tamga.Sdk;
+using Tamga.Sdk.Models;
+
+var (machine, validation) = await client.ActivateMachineAsync(new CreateMachineRequest
+{
+    Fingerprint = "a-stable-machine-fingerprint",
+    LicenseId = licenseId,
+    Hostname = Environment.MachineName,
+});
+
+if (!validation.Valid)
+{
+    // Over-limit activations are rolled back for you: ActivateMachineAsync
+    // deletes the machine it just created when validation comes back
+    // TooManyMachines / TooManyCores / TooMuchMemory / TooMuchDisk /
+    // TooManyProcesses, unless you pass deleteOnOverLimit: false.
+    Console.WriteLine($"Activation rejected: {validation.Code}");
+    return;
+}
+
+await using var heartbeat = new HeartbeatScheduler(client, machine.Id);
+heartbeat.Pinged += m => Console.WriteLine($"heartbeat ok: {m.HeartbeatStatus}");
+heartbeat.Dead += _ => Console.WriteLine("machine culled server-side — re-activate");
+heartbeat.Faulted += ex => Console.WriteLine($"ping failed: {ex.Message}");
+heartbeat.Start();
+```
+
+[`samples/`](samples/) holds five runnable console programs covering
+validation, offline license checkout and verification, machine activation
+with heartbeats, offline proofs, and entitlements.
 
 ## Auth transports
 
-`TamgaClientOptions.Auth` accepts one of the following (server tries them
-in this order; `License` is the expected default for this SDK's typical
-embedded/client use case):
+`TamgaClientOptions.Auth` accepts any one of the eight transports below
+(`src/Tamga.Sdk/Transport.cs::AuthTransport`, applied by
+`TamgaTransport.ApplyAuth`). `License` is the expected default for this
+SDK's typical embedded/client use case; `null` sends no credentials at all.
 
-| Transport | Constructor | Header/query sent |
+| Transport | Constructor | Sent as |
 |---|---|---|
 | Bearer token | `new AuthTransport.Bearer(token)` | `Authorization: Bearer <token>` |
 | Basic (email/password) | `new AuthTransport.BasicEmailPassword(email, password)` | `Authorization: Basic base64(email:password)` |
 | Basic (token) | `new AuthTransport.BasicToken(token)` | `Authorization: Basic base64(token:)` |
 | Basic (license) | `new AuthTransport.BasicLicense(key)` | `Authorization: Basic base64(license:key)` |
 | License key | `new AuthTransport.License(key)` | `Authorization: License <key>` |
-| Session cookie | `new AuthTransport.Cookie(sessionId, origin)` | `Cookie: Tamga-Session=<uuid>` + `Origin` header (browser/portal only) |
+| Session cookie | `new AuthTransport.Cookie(sessionId, origin)` | `Cookie: Tamga-Session=<uuid>` + `Origin` (browser/portal only) |
 | Query token | `new AuthTransport.QueryToken(token)` | `?token=<token>` |
 | Query auth | `new AuthTransport.QueryAuth(token)` | `?auth=<token>` |
 
-Every issued token is `tok-`-prefixed regardless of documented intent
-(`tok-`/`prod-`/`env-`/`activ-`/`lic-`) — this SDK never parses token
-prefixes for type detection; treat tokens as opaque strings.
+Tokens are opaque strings. Every issued token carries a `tok-` prefix
+regardless of its documented intent (`tok-`/`prod-`/`env-`/`activ-`/`lic-`),
+so this SDK never parses a prefix to infer a token's type.
 
-## Known Server-Side Gaps
+A TOTP code can be attached to every authenticated request with
+`TamgaClientOptions.Otp`, which is sent as the `Tamga-OTP` header.
 
-Condensed from `tamga-api/docs/sdk.md`'s "Known Server-Side Gaps" section,
-scoped to what this SDK's consumers need to know:
+## Offline verification
 
-- **Auth is not enforced** on license or machine endpoints server-side
-  today. This SDK still always sends the configured `Auth` transport —
-  forward-compatible once enforcement lands.
-- Only **14 of 24** `ValidationCode` values are reachable today. `NotFound`
-  is declared but never emitted (the server returns HTTP 404 directly
-  instead); 9 others (`Banned`, `EntitlementsMissing`, `TooManyUsers`,
-  `HeartbeatDead`, `HeartbeatNotStarted`, `FingerprintScopeMismatch`,
-  `ComponentsScopeMismatch`, `ChecksumScopeMismatch`,
-  `VersionScopeMismatch`) are modeled for forward-compatibility but never
-  actually returned — don't build UX around them.
-- `429 TOO_MANY_REQUESTS` is declared in the server's error model but never
-  actually returned — this SDK deliberately has no client-side
-  backoff/retry logic for it.
-- Fresh policies can report `overage_strategy: "DENY_ACCESS"` and
-  `heartbeat_resurrection_strategy: "NO_RESURRECTION"` — **neither is a
-  real enum variant**; the server silently treats them as `NoOverage`/
-  `NoRevive`. This SDK's `Policy` decoders map both to the "no
-  restriction" variant without throwing.
-- Auto-update/release-checking (`GET /releases/actions/upgrade`) is broken
-  server-side (missing DB tables) and has no working download-URL endpoint
-  even once fixed. This SDK does not implement it.
+> **Compatibility warning — v1 offline license files are rejected.** A
+> `.lic` file must be format v2: its `alg` has to end in `+v2` and its
+> payload has to carry the signed `meta` claims. Pre-v2 files are rejected
+> outright with no fallback path
+> (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.VerifyWithClaims`),
+> so a caller holding a v1-issued file must check the license out again
+> against a current server.
+
+Check out a license file, then verify and decrypt it with no network access:
+
+```csharp
+using Tamga.Sdk;
+using Tamga.Sdk.Checkout;
+using Tamga.Sdk.Models;
+
+LicenseFile file = await client.CheckOutLicenseAsync(licenseId, encrypt: true, ttl: 3600);
+
+// Persist file.Certificate somewhere; verify it later, offline.
+byte[] accountPublicKey = Convert.FromBase64String(accountEd25519PublicKeyBase64);
+
+try
+{
+    License license = file.VerifyAndDecrypt(accountPublicKey, "YOUR-LICENSE-KEY");
+    Console.WriteLine($"Verified license {license.Id}, uses {license.Uses}.");
+}
+catch (LicenseFileExpiredException ex)
+{
+    Console.WriteLine($"File expired at {ex.ExpiresAt} — check out a fresh one.");
+}
+catch (SignatureVerificationException)
+{
+    Console.WriteLine("File failed verification — treat as untrusted.");
+}
+```
+
+`VerifyWithClaims` returns the signed claims alongside the license, for
+`jti` replay detection or `kid` key-rotation bookkeeping, and lets you supply
+the current time rather than trusting a user-controlled system clock:
+
+```csharp
+(License license, LicenseFileClaims claims) = file.VerifyWithClaims(
+    accountPublicKey,
+    "YOUR-LICENSE-KEY",
+    serverSuppliedUnixSeconds);
+
+Console.WriteLine($"jti={claims.Id} kid={claims.KeyId} exp={claims.ExpiresAt}");
+```
+
+Machine files work the same way, except that they are bound to one machine
+and that the signature scheme comes from the license's own policy rather than
+being fixed:
+
+```csharp
+using Tamga.Sdk.Checkout;
+using Tamga.Sdk.Models;
+
+MachineFile machineFile = await client.CheckOutMachineAsync(machineId, encrypt: true, ttl: 3600);
+
+Machine machine = machineFile.VerifyAndDecrypt(
+    LicenseScheme.Ed25519Sign,
+    accountPublicKey,
+    "YOUR-LICENSE-KEY",
+    "a-stable-machine-fingerprint");
+```
+
+`ttl` is validated client-side before the request is sent, mirroring the
+server's `> 0 && <= 31536000` range check
+(`src/Tamga.Sdk/Checkout/MachineFile.cs::MachineFile.ValidateTtl`).
+
+## Security notes
+
+- **Both offline file formats derive their AES-256-GCM key with
+  HKDF-SHA256.** A license file uses
+  `salt = "tamga:license-file-key-v1"`, `ikm = <license key>`,
+  `info = "license-file"`
+  (`src/Tamga.Sdk/Crypto/Hkdf.cs::Hkdf.DeriveLicenseFileKey`); a machine file
+  uses `salt = "tamga:machine-file-key-v1"`, `ikm = <license key>`,
+  `info = <machine fingerprint>`
+  (`src/Tamga.Sdk/Crypto/Hkdf.cs::Hkdf.DeriveMachineFileKey`), which is why a
+  machine file cannot be decrypted anywhere but on the machine it was issued
+  for. The pre-v2 license-file transform — the license key's raw UTF-8 bytes
+  zero-padded to 32 — was removed rather than deprecated; no code path can
+  produce or consume it.
+- **Expiry is enforced, not advisory.** `iat`/`exp`/`jti`/`kid` are carried
+  inside the signed bytes (`src/Tamga.Sdk/Models/License.cs::LicenseFileClaims`)
+  and checked on every verify, with a fixed 60-second clock-skew tolerance
+  (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.VerifyWithClaims`).
+  The `ttl`/`expiry` fields returned in the checkout response envelope remain
+  metadata only — they are not signed.
+- **Verification fails closed.** License files are Ed25519-only
+  (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.Verify`). Machine files
+  dispatch on the `LicenseScheme` you pass in, never on the file's own
+  self-declared `alg`
+  (`src/Tamga.Sdk/Checkout/MachineFile.cs::MachineFile.Verify`) — two distinct
+  RSA schemes share one `alg` suffix on the wire, so trusting that string
+  would be an algorithm-confusion hole. ECDSA verification pins the P-256
+  curve (`src/Tamga.Sdk/Crypto/Ecdsa.cs::Ecdsa.Verify`).
+- **Signatures cover the base64 string, not the decoded bytes.** Both file
+  formats sign the UTF-8 bytes of the `enc` base64 string itself
+  (`LicenseFile.Verify`, `MachineFile.Verify`). Any reimplementation that
+  hashes the decoded payload will reject every genuine file.
+- **Offline proofs are always RSA-2048 PKCS#1 v1.5 / SHA-256**, over a
+  recursively alphabetically key-sorted canonical JSON payload
+  (`src/Tamga.Sdk/Proof.cs::MachineProof.BuildSignedPayload`,
+  `MachineProof.Verify`) — the ordering the server's own serializer produces.
+- **HTTP 429 is retried with backoff.**
+  `src/Tamga.Sdk/Transport.cs::TamgaTransport.SendWithRetryAsync` retries a
+  rate-limited request using jittered exponential backoff
+  (`TamgaTransport.RetryDelay`), preferring a parsed `Retry-After` capped at
+  60 seconds (`TamgaTransport.ParseRetryAfter`). Auto-retry is scoped to
+  `GET` plus five safe `POST` actions — `validate`, `validate-key`,
+  `check-in`, `check-out`, `ping` (`TamgaTransport.IsRetryable`). Creates are
+  deliberately excluded, because a repeated `POST /machines` can burn a second
+  seat. Set `TamgaClientOptions.MaxRetries` to `0` to handle `429` yourself.
+
+Vulnerability reporting and the full threat model live in
+[SECURITY.md](SECURITY.md).
+
+## Known gaps
+
+Behaviors of the current server that a consumer of this SDK needs to plan
+around:
+
+- **Auth is not enforced server-side** on the license or machine endpoints
+  today. This SDK still always sends the configured `Auth` transport, so no
+  change is needed once enforcement lands.
+- **Only 14 of the 24 `ValidationCode` values are reachable.** `NotFound` is
+  modeled but never emitted (the server returns HTTP 404 directly instead),
+  and `Banned`, `EntitlementsMissing`, `TooManyUsers`, `HeartbeatDead`,
+  `HeartbeatNotStarted`, `FingerprintScopeMismatch`, `ComponentsScopeMismatch`,
+  `ChecksumScopeMismatch` and `VersionScopeMismatch` exist for
+  forward-compatibility only. Do not build UX around them.
+- **`Scope` is only partly enforced.** `Product`, `Policy`, `User` and
+  `Environment` constrain validation; `Entitlements`, `Fingerprint`,
+  `Version` and `Checksum` are accepted and silently ignored.
+- **A fresh policy can report enum strings that are not real variants**
+  (`overage_strategy: "DENY_ACCESS"`, `heartbeat_resurrection_strategy:
+  "NO_RESURRECTION"`). The server treats both as the no-restriction case, and
+  so do this SDK's decoders — neither is surfaced as a distinct C# member,
+  because that would imply a restriction the server does not apply.
+- **`Policy.HeartbeatDuration` does not drive the heartbeat window.** The
+  server uses a hardcoded 600 seconds. `HeartbeatScheduler` defaults to about
+  a third of that; do not derive an interval from the policy field.
+- **`Policy.MaxMemory` and `Policy.MaxDisk` are absent from `GET` responses**
+  even though both are enforced during validation, so they cannot be
+  introspected client-side — only observed as `TooMuchMemory`/`TooMuchDisk`
+  on a failed validation.
+- **Checkout `includes` is always empty**, and each checkout mints a fresh
+  certificate: the call is not idempotent.
+- **`X-RateLimit-*` response headers are not parsed**, because the server
+  never actually sets them.
+- **Auto-update and release-checking are not implemented.** The server-side
+  endpoint is non-functional and there is no artifact-download endpoint, so
+  this SDK exposes no update-check method.
 
 ## Documentation
 
-- [`tamga-api/docs/sdk.md`](https://github.com/tamga-sh/tamga-api/blob/main/docs/sdk.md) —
-  the authoritative, server-verified protocol/feature spec every SDK in the
-  `tamga-sh` organization is built against, including the full "Known
-  Server-Side Gaps" section.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — local dev setup, build/test
-  commands, coding standards.
+- [tamga.sh](https://tamga.sh) — product documentation and the API reference.
+- [`samples/`](samples/) — five runnable end-to-end console programs.
+- [CONTRIBUTING.md](CONTRIBUTING.md) — local dev setup, build/test commands,
+  coding standards.
+- [SECURITY.md](SECURITY.md) — threat model and vulnerability reporting.
+- XML doc comments ship in the package, so IntelliSense carries the
+  per-endpoint notes inline.
 
 ## License
 
