@@ -21,9 +21,29 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
     steps:
+      # Mint a short-lived installation token for the tamga-release-bot
+      # GitHub App and hand it to release-please below, so the release PR is
+      # authored by the App instead of the default GITHUB_TOKEN. GitHub
+      # refuses to trigger workflows from GITHUB_TOKEN-authored events
+      # (loop prevention), so CI never ran on the release PR, the required
+      # status checks that branch protection on main demands never appeared,
+      # and every release so far needed an admin override to merge.
+      # App-authored PRs do trigger workflows, so ci.yml now runs normally.
+      #
+      # Scope this token to the release-please step ONLY — never as a job- or
+      # workflow-level env var. The publish job authenticates to NuGet.org
+      # via OIDC Trusted Publishing using the workflow's own identity and its
+      # id-token: write permission; it must not pick this token up.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v5
         id: release
         with:
+          token: ${{ steps.app-token.outputs.token }}
           release-type: simple
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
