@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.2](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.1...v2.0.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **ci:** open release PRs with a GitHub App token so required checks run ([#26](https://github.com/tamga-sh/tamga-dotnet/issues/26)) ([4e3537e](https://github.com/tamga-sh/tamga-dotnet/commit/4e3537e4444673afa31f3c525a156c9c8a47fc07))
+
 ## [2.0.1](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.0...v2.0.1) (2026-08-18)
 
 
