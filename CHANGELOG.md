@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.0...v2.0.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* correct SDK documentation and align package metadata ([7d79ccf](https://github.com/tamga-sh/tamga-dotnet/commit/7d79ccfc87166529c7dd0be7981b600e0b341e47))
+
 ## [1.1.0](https://github.com/tamga-sh/tamga-dotnet/compare/v1.0.5...v1.1.0) (2026-08-13)
 
 
