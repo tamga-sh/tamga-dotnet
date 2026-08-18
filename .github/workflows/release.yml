@@ -18,12 +18,35 @@ jobs:
   release-please:
     name: release-please
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
     steps:
+      # Mint a short-lived installation token for the tamga-release-bot
+      # GitHub App and hand it to release-please below, so the release PR is
+      # authored by the App instead of the default GITHUB_TOKEN. GitHub
+      # refuses to trigger workflows from GITHUB_TOKEN-authored events
+      # (loop prevention), so CI never ran on the release PR, the required
+      # status checks that branch protection on main demands never appeared,
+      # and every release so far needed an admin override to merge.
+      # App-authored PRs do trigger workflows, so ci.yml now runs normally.
+      #
+      # Scope this token to the release-please step ONLY — never as a job- or
+      # workflow-level env var. The publish job authenticates to NuGet.org
+      # via OIDC Trusted Publishing using the workflow's own identity and its
+      # id-token: write permission; it must not pick this token up.
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        timeout-minutes: 10
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
       - uses: googleapis/release-please-action@v5
         id: release
+        timeout-minutes: 10
         with:
+          token: ${{ steps.app-token.outputs.token }}
           release-type: simple
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
@@ -45,6 +68,7 @@ jobs:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       # A job-level `permissions:` block replaces the workflow-level
       # default for that job rather than adding to it — contents: read is
@@ -55,16 +79,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        timeout-minutes: 10
         with:
           fetch-depth: 0 # MinVer needs full history to find the just-created tag
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
+        timeout-minutes: 10
         with:
           dotnet-version: 8.0.x
 
       - name: Restore
         run: dotnet restore Tamga.sln
+        timeout-minutes: 10
 
       - name: Pack
         # MinVer reads the tag from the release that triggered this job and
@@ -80,6 +107,7 @@ jobs:
         # "Publishing Method".
         uses: NuGet/login@v1
         id: login
+        timeout-minutes: 10
         with:
           # Must be the nuget.org username of the account that CREATED the
           # trust policy (the "policy creator"), NOT the Package Owner
@@ -90,6 +118,7 @@ jobs:
           user: necipsunmaz
 
       - name: Push to NuGet.org
+        timeout-minutes: 10
         run: >
           dotnet nuget push ./artifacts/*.nupkg
           --source https://api.nuget.org/v3/index.json

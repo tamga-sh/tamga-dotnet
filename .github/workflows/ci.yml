@@ -13,6 +13,7 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -25,16 +26,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        timeout-minutes: 10
         with:
           fetch-depth: 0 # MinVer needs full history to find the nearest tag
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
+        timeout-minutes: 10
         with:
           dotnet-version: 8.0.x
 
       - name: Restore
         run: dotnet restore Tamga.sln
+        timeout-minutes: 10
 
       - name: Format check
         # Fails the job on formatting drift against .editorconfig instead of
@@ -63,6 +67,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
+        timeout-minutes: 10
         with:
           # coverlet.msbuild writes next to the test project by default —
           # there is no ./coverage/ directory to point at (a previous
