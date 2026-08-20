@@ -35,7 +35,7 @@ jobs:
       # workflow-level env var. The publish job authenticates to NuGet.org
       # via OIDC Trusted Publishing using the workflow's own identity and its
       # id-token: write permission; it must not pick this token up.
-      - uses: actions/create-github-app-token@v2
+      - uses: actions/create-github-app-token@v3
         id: app-token
         timeout-minutes: 10
         with:
