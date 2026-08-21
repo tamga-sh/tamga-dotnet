@@ -50,6 +50,20 @@
   </ItemGroup>
 
   <!--
+    Cross-port fingerprint canonicalisation vectors, embedded on the same terms
+    as the fixtures above: this file is the shared specification and test suite
+    for all eight SDKs, and its digests come from an independent SHA-256
+    implementation rather than from any SDK. Copied into the repo so the tests
+    run offline. See Fixtures/Fingerprints/PROVENANCE.md — do NOT regenerate,
+    and in particular do NOT "improve" the .NET port by adding String.Normalize.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures/Fingerprints/fingerprint.json">
+      <LogicalName>FingerprintFixtures/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!--
     Inline coverage-gate threshold for `dotnet test`. Matches the CI
     invocation in .github/workflows/ci.yml — see CLAUDE.md "Testing".
     Not embedded as a static <CoverletThreshold> here because CI passes it
