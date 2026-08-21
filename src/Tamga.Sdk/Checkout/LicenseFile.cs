@@ -195,6 +195,113 @@ public sealed class LicenseFile
             throw new SignatureVerificationException("License file signature verification failed — the file may be forged or corrupted.");
         }
 
+        var payload = ParsePayload(DecodePayloadJson(licenseKey));
+        return FinishPayload(payload, nowUnixSeconds);
+    }
+
+    /// <summary>
+    /// Verifies a <c>.lic</c> file against a <see cref="SigningKeySet"/>, selecting the key by the
+    /// file's own signed <c>kid</c> claim so a file that predates a key rotation still verifies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Use this instead of the single-key overload whenever the account may ever rotate.</b>
+    /// Three outcomes, and keeping them apart is the whole point:
+    /// </para>
+    /// <list type="bullet">
+    /// <item><description>
+    /// the <c>kid</c> is in the set and the signature checks out → the file is good;
+    /// </description></item>
+    /// <item><description>
+    /// the <c>kid</c> is not in the set → <see cref="UnknownSigningKeyException"/> (or
+    /// <see cref="UnpublishedSigningKeyException"/>). <b>Not a forgery</b> — refresh the key set or
+    /// ship an update, then retry;
+    /// </description></item>
+    /// <item><description>
+    /// the <c>kid</c> IS in the set and the signature still fails →
+    /// <see cref="SignatureVerificationException"/>. Refuse the file.
+    /// </description></item>
+    /// </list>
+    /// <para>
+    /// <b>One ordering difference from the single-key overload is worth knowing.</b> Selecting a
+    /// key needs the <c>kid</c>, and the <c>kid</c> lives inside <c>enc</c>, so <c>enc</c> is
+    /// decoded — and, when encrypted, decrypted under the license key, which is itself
+    /// authenticated by AES-GCM — <em>before</em> the signature is checked. A file that is
+    /// malformed or undecryptable therefore reports that rather than a signature failure. Nothing
+    /// from those bytes is trusted: the only value taken from them before verification is the
+    /// <c>kid</c>, and it can only ever select from keys the caller already supplied, never
+    /// introduce one. No <see cref="License"/> is ever produced from an unverified payload.
+    /// </para>
+    /// </remarks>
+    /// <param name="signingKeys">The trusted key set — from <c>TamgaClient.GetSigningKeySetAsync</c> or <see cref="SigningKeySet.FromPublicKeys(string[])"/>.</param>
+    /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
+    /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
+    /// <returns>The license, the signed claims, and the key the file was verified against.</returns>
+    /// <exception cref="UnknownSigningKeyException">The file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
+    /// <exception cref="UnpublishedSigningKeyException">The signing account has no Ed25519 public key recorded server-side.</exception>
+    /// <exception cref="SignatureVerificationException">The named key IS trusted and the signature still failed — the file is forged or corrupted.</exception>
+    /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
+    /// <exception cref="OfflineFileFormatException">The payload is malformed or carries no signed <c>meta</c> claims.</exception>
+    public (License License, LicenseFileClaims Claims, SigningKey Key) VerifyWithKeySet(
+        SigningKeySet signingKeys,
+        string licenseKey,
+        long nowUnixSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(signingKeys);
+
+        // Decode first — the kid we need to pick a key is inside the payload. See the remarks
+        // above for why reading it before verification is sound.
+        var payload = ParsePayload(DecodePayloadJson(licenseKey));
+        var claims = payload.Meta
+            ?? throw new OfflineFileFormatException(
+                "License file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
+
+        var (key, publicKeyBytes) = signingKeys.Resolve(claims.KeyId);
+
+        // Verified against exactly the key the kid named, and nothing else. There is deliberately
+        // no fallback that tries the other keys: it would verify the same files while destroying
+        // the distinction between "stale key set" and "forged file".
+        if (!Verify(publicKeyBytes))
+        {
+            throw new SignatureVerificationException(
+                $"License file signature verification failed against the key its 'kid' claim names ('{claims.KeyId}'), " +
+                "which IS in the supplied key set — the file is forged or corrupted.");
+        }
+
+        var (license, verifiedClaims) = FinishPayload(payload, nowUnixSeconds);
+        return (license, verifiedClaims, key);
+    }
+
+    /// <summary>
+    /// As <see cref="VerifyWithKeySet"/>, using the local clock and returning just the license.
+    /// </summary>
+    /// <param name="signingKeys">The trusted key set.</param>
+    /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
+    public License VerifyAndDecrypt(SigningKeySet signingKeys, string licenseKey)
+        => VerifyAndDecrypt(signingKeys, licenseKey, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+    /// <summary>
+    /// As <see cref="VerifyAndDecrypt(SigningKeySet, string)"/>, with the current time supplied by
+    /// the caller — see <see cref="VerifyAndDecrypt(ReadOnlySpan{byte}, string, long)"/> for why
+    /// that matters.
+    /// </summary>
+    /// <param name="signingKeys">The trusted key set.</param>
+    /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
+    /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch.</param>
+    public License VerifyAndDecrypt(SigningKeySet signingKeys, string licenseKey, long nowUnixSeconds)
+        => VerifyWithKeySet(signingKeys, licenseKey, nowUnixSeconds).License;
+
+    /// <summary>
+    /// Decodes <c>enc</c> to the payload JSON bytes: base64-decode, enforce the <c>+v2</c> gate,
+    /// then decrypt or pass through by <c>alg</c>.
+    /// </summary>
+    /// <remarks>
+    /// Extracted so the single-key and key-set paths share one implementation — two copies would
+    /// drift, and a drift in the <c>+v2</c> gate is a silently reintroduced permanent-file bug.
+    /// The order of checks is exactly what the single-key path always did.
+    /// </remarks>
+    private byte[] DecodePayloadJson(string licenseKey)
+    {
         byte[] payloadBytes;
         try
         {
@@ -205,7 +312,6 @@ public sealed class LicenseFile
             throw new OfflineFileFormatException($"License file 'enc' is not valid base64: {ex.Message}");
         }
 
-        byte[] jsonBytes;
         // The +v2 suffix is load-bearing: a v1 file carried no expiry inside its signature, so
         // accepting one would hand back the permanent-file problem v2 exists to close.
         if (!Certificate.Alg.EndsWith("+v2", StringComparison.Ordinal))
@@ -215,17 +321,20 @@ public sealed class LicenseFile
 
         if (Certificate.Alg.Contains("aes-256-gcm", StringComparison.Ordinal))
         {
-            jsonBytes = DecryptPayload(payloadBytes, licenseKey);
-        }
-        else if (Certificate.Alg.Contains("base64", StringComparison.Ordinal))
-        {
-            jsonBytes = payloadBytes;
-        }
-        else
-        {
-            throw new UnsupportedAlgorithmException($"Unsupported license file algorithm: '{Certificate.Alg}'.");
+            return DecryptPayload(payloadBytes, licenseKey);
         }
 
+        if (Certificate.Alg.Contains("base64", StringComparison.Ordinal))
+        {
+            return payloadBytes;
+        }
+
+        throw new UnsupportedAlgorithmException($"Unsupported license file algorithm: '{Certificate.Alg}'.");
+    }
+
+    /// <summary>Deserializes the payload JSON and rejects a payload carrying no signed claims.</summary>
+    private static LicenseFilePayload ParsePayload(byte[] jsonBytes)
+    {
         LicenseFilePayload? payload;
         try
         {
@@ -249,14 +358,22 @@ public sealed class LicenseFile
                 "License file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
         }
 
+        return payload;
+    }
+
+    /// <summary>Enforces the signed <c>exp</c> claim and maps the resource. Runs only after a signature has verified.</summary>
+    private static (License License, LicenseFileClaims Claims) FinishPayload(LicenseFilePayload payload, long nowUnixSeconds)
+    {
+        var meta = payload.Meta!;
+
         // The signature proves the file is authentic. It does not prove it is still valid — that
         // is this check, and skipping it is what made v1 files permanent.
-        if (payload.Meta.ExpiresAt is { } exp && nowUnixSeconds - ClockSkewToleranceSeconds > exp)
+        if (meta.ExpiresAt is { } exp && nowUnixSeconds - ClockSkewToleranceSeconds > exp)
         {
             throw new LicenseFileExpiredException(exp);
         }
 
-        return (License.FromResource(payload.Data), payload.Meta);
+        return (License.FromResource(payload.Data), meta);
     }
 
     /// <summary>
