@@ -199,20 +199,50 @@ server's `> 0 && <= 31536000` range check
   for. The pre-v2 license-file transform — the license key's raw UTF-8 bytes
   zero-padded to 32 — was removed rather than deprecated; no code path can
   produce or consume it.
-- **Expiry is enforced, not advisory.** `iat`/`exp`/`jti`/`kid` are carried
-  inside the signed bytes (`src/Tamga.Sdk/Models/License.cs::LicenseFileClaims`)
-  and checked on every verify, with a fixed 60-second clock-skew tolerance
-  (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.VerifyWithClaims`).
-  The `ttl`/`expiry` fields returned in the checkout response envelope remain
-  metadata only — they are not signed.
+- **Expiry is enforced, not advisory — on both file formats.**
+  `iat`/`exp`/`jti`/`kid` are carried inside the signed bytes
+  (`src/Tamga.Sdk/Models/License.cs::LicenseFileClaims`) and checked on every
+  verify, with one shared 60-second clock-skew tolerance
+  (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.VerifyWithClaims`,
+  `src/Tamga.Sdk/Checkout/MachineFile.cs::MachineFile.VerifyWithClaims`). An
+  expired-but-authentic file raises `LicenseFileExpiredException`, distinct
+  from the `SignatureVerificationException` a forged one raises, so "fetch a
+  fresh file" and "someone tampered with this" are not the same outcome. A
+  checkout made without a `ttl` legitimately carries no `exp` and never
+  expires. Each `VerifyAndDecrypt`/`VerifyWithClaims` has an overload taking
+  `nowUnixSeconds`, so an application holding a server-supplied timestamp can
+  use it instead of the local clock, which on an offline client is under the
+  attacker's control. The `ttl`/`expiry` fields returned in the checkout
+  response envelope remain metadata only — they are not signed.
+- **`alg` is parsed, never sniffed, and format v2 is mandatory.** A machine
+  file's `alg` is `<encoding>+<signing-suffix>+v2`; the encoding runs to the
+  first `+`, the version marker follows the last `+`, and the suffix is what
+  lies between (`MachineFile.VerifyWithClaims`). A file without `+v2` is
+  refused — a v1 file carried no `exp` inside its signature and derived its
+  AES key without HKDF. `alg` sits outside the signature and is therefore
+  attacker-malleable, which is why it is gated rather than trusted.
+- **An encrypted machine file's `enc` is two base64 halves, not one blob.**
+  It is `<nonce_b64>.<ciphertext_b64>`, decoded independently, with the GCM
+  tag already inside the second half — unlike a license file, whose encrypted
+  `enc` really is a single `base64(nonce || ciphertext || tag)`. The signature
+  is checked over the whole `enc` string before either half is decoded.
 - **Verification fails closed.** License files are Ed25519-only
   (`src/Tamga.Sdk/Checkout/LicenseFile.cs::LicenseFile.Verify`). Machine files
   dispatch on the `LicenseScheme` you pass in, never on the file's own
   self-declared `alg`
   (`src/Tamga.Sdk/Checkout/MachineFile.cs::MachineFile.Verify`) — two distinct
   RSA schemes share one `alg` suffix on the wire, so trusting that string
-  would be an algorithm-confusion hole. ECDSA verification pins the P-256
-  curve (`src/Tamga.Sdk/Crypto/Ecdsa.cs::Ecdsa.Verify`).
+  would be an algorithm-confusion hole. The file's `alg` suffix is a
+  cross-check only: a file that contradicts the scheme you passed is refused,
+  but it can never widen it. ECDSA verification pins the P-256 curve
+  (`src/Tamga.Sdk/Crypto/Ecdsa.cs::Ecdsa.Verify`).
+- **Public keys are accepted in the encodings the server actually emits.**
+  Ed25519 is a raw 32-byte key; ECDSA P-256 is a raw 65-byte SEC1 uncompressed
+  point (`0x04 || X || Y`), not SPKI DER; RSA is accepted as either PKCS#1
+  `RSAPublicKey` DER or X.509 `SubjectPublicKeyInfo` DER, because the server
+  produces both for the same key depending on which code path you got it from
+  (`src/Tamga.Sdk/Crypto/Ecdsa.cs::Ecdsa.TryImportPublicKey`,
+  `src/Tamga.Sdk/Crypto/Rsa.cs::Rsa.TryImportPublicKey`).
 - **Signatures cover the base64 string, not the decoded bytes.** Both file
   formats sign the UTF-8 bytes of the `enc` base64 string itself
   (`LicenseFile.Verify`, `MachineFile.Verify`). Any reimplementation that

@@ -35,7 +35,7 @@ public enum HeartbeatStatus
     /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>); and license validation never emits
     /// <c>HEARTBEAT_DEAD</c>. The single place this value reaches a caller today is the machine
     /// inside a checked-out <c>.machine</c> file
-    /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt"/>), which is resolved through a read
+    /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/>), which is resolved through a read
     /// query. Treat <c>if (status == Dead)</c> written against a ping result as dead code.
     ///
     /// ⚠ <b>And where it IS observable, it does not mean the row was culled</b>, deleted, or that
@@ -192,7 +192,7 @@ public sealed record Machine
     /// against the 600s fallback even when the policy sets a shorter <c>heartbeat_duration</c>.
     /// </description></item>
     /// <item><description>
-    /// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> — the machine embedded in a
+    /// <see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/> — the machine embedded in a
     /// <c>.machine</c> file from <see cref="TamgaClient.CheckOutMachineAsync"/> — is resolved
     /// through a query that DOES join <c>policies</c>, so there this carries the real
     /// policy-derived value. <c>NextHeartbeatAt - LastHeartbeatAt</c> on such a machine therefore

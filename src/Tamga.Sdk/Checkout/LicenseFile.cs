@@ -260,14 +260,18 @@ public sealed class LicenseFile
     }
 
     /// <summary>
-    /// How much clock skew is tolerated when checking <c>exp</c>.
+    /// How much clock skew is tolerated when checking <c>exp</c>, for BOTH offline file formats.
     /// </summary>
     /// <remarks>
     /// Deliberately small. The client's clock is under the attacker's control, so a generous
     /// allowance is just a free extension on every expired file; this covers ordinary NTP drift
     /// and nothing more.
+    ///
+    /// <see cref="MachineFile"/> reads this same constant rather than declaring its own. Two
+    /// copies would drift, and the drift would be invisible: one of the two file types would
+    /// silently start honouring a different grace period than the other.
     /// </remarks>
-    private const long ClockSkewToleranceSeconds = 60;
+    internal const long ClockSkewToleranceSeconds = 60;
 
     private static byte[] DecryptPayload(byte[] payloadBytes, string licenseKey)
     {

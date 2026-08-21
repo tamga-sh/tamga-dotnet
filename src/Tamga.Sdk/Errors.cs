@@ -230,12 +230,18 @@ public sealed class UnsupportedAlgorithmException : Exception
 }
 
 /// <summary>
-/// Thrown when a <c>.lic</c> file's signature verified but its signed <c>exp</c> claim has
-/// passed — an authentic license file that has simply run out.
+/// Thrown when an offline file's signature verified but its signed <c>exp</c> claim has
+/// passed — an authentic file that has simply run out.
 /// </summary>
 /// <remarks>
 /// Its own type on purpose: a caller that cannot tell "expired" from "forged" either warns the
 /// user about tampering when their trial merely ended, or treats a forgery as a renewal prompt.
+///
+/// Raised by BOTH offline file formats — <see cref="Checkout.LicenseFile"/> and
+/// <see cref="Checkout.MachineFile"/> — which carry the same signed
+/// <see cref="Models.LicenseFileClaims"/> shape and share one clock-skew tolerance. The name
+/// keeps its <c>LicenseFile</c> prefix for source compatibility; the message it builds says
+/// "License file" for the same reason. Catch it on a machine-file verify too.
 /// </remarks>
 public sealed class LicenseFileExpiredException : Exception
 {

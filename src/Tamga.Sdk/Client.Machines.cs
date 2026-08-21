@@ -225,7 +225,7 @@ public sealed partial class TamgaClient
 /// <para>
 /// <b>A response built off a READ can report <c>DEAD</c>, and one such route already reaches
 /// you:</b> the machine embedded in a checked-out <c>.machine</c> file.
-/// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> returns a <see cref="Machine"/> whose
+/// <see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/> returns a <see cref="Machine"/> whose
 /// <see cref="Machine.HeartbeatStatus"/> is bound straight from the file's payload, and that file
 /// is resolved server-side through a read query. So <c>DEAD</c> is a real state a caller of this
 /// SDK can genuinely receive — just never from this loop. A machine-read method added later would

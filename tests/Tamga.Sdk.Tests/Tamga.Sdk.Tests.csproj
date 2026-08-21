@@ -25,6 +25,19 @@
   </ItemGroup>
 
   <!--
+    Server-issued .machine fixtures, embedded (not copied) so a CI run needs
+    nothing on disk beside the test assembly. LogicalName is pinned rather
+    than left to MSBuild's directory-to-namespace mangling, so a future
+    fixture drop can be dropped in verbatim and picked up by name.
+    See Fixtures/MachineFiles/PROVENANCE.md — do NOT regenerate these here.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Fixtures/MachineFiles/*.machine;Fixtures/MachineFiles/manifest.json">
+      <LogicalName>MachineFileFixtures/%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!--
     Inline coverage-gate threshold for `dotnet test`. Matches the CI
     invocation in .github/workflows/ci.yml — see CLAUDE.md "Testing".
     Not embedded as a static <CoverletThreshold> here because CI passes it
