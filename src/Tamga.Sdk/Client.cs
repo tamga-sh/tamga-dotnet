@@ -40,12 +40,19 @@ public sealed partial class TamgaClient : IDisposable
     }
 
     /// <summary>Disposes the internal <see cref="HttpClient"/> if this instance created and owns it; a no-op for externally-injected clients.</summary>
+    /// <remarks>
+    /// Covers the artifact-download client too, on the same ownership rule: one this instance
+    /// lazily created for itself is disposed here, one supplied through
+    /// <see cref="TamgaClientOptions.ArtifactDownloadHttpClient"/> is left alone.
+    /// </remarks>
     public void Dispose()
     {
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();
         }
+
+        DisposeArtifactDownloadHttpClient();
     }
 
     // ---------------------------------------------------------------

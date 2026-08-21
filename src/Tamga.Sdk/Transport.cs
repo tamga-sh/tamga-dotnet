@@ -52,6 +52,35 @@ public sealed class TamgaClientOptions
 
     /// <summary>TOTP 2FA code, sent as <c>Tamga-OTP</c> on every authenticated request when set.</summary>
     public string? Otp { get; init; }
+
+    /// <summary>
+    /// The <see cref="HttpClient"/> used to fetch presigned artifact bytes from the storage host
+    /// in <see cref="TamgaClient.DownloadArtifactAsync"/>. <see langword="null"/> (the default)
+    /// lets the client create and own a credential-free one on first use.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Whatever is supplied here must carry no Tamga credential.</b> A presigned URL points
+    /// at object storage, not at the Tamga API, and it authenticates itself through the signature
+    /// in its own query string. Anything attached on top — an <c>Authorization</c> header, a
+    /// session cookie, a <see cref="HttpClient.DefaultRequestHeaders"/> entry set by an
+    /// <c>IHttpClientFactory</c> pipeline — is handed to a third-party host that has no business
+    /// seeing it.
+    /// </para>
+    /// <para>
+    /// This is deliberately a SEPARATE client from the one <see cref="TamgaClient"/> sends API
+    /// requests on, and the SDK never reuses the API client for the storage fetch. That is why
+    /// the option exists at all: a caller who wants to control the download's proxy, timeout or
+    /// connection pooling can, without the SDK having to choose between honouring that and
+    /// keeping the credential off the wire.
+    /// </para>
+    /// <para>
+    /// A client supplied here is NOT disposed by <see cref="TamgaClient.Dispose"/> — the caller
+    /// keeps ownership, exactly as with the <see cref="TamgaClient(TamgaClientOptions, HttpClient)"/>
+    /// constructor. One the SDK created for itself is disposed with the client.
+    /// </para>
+    /// </remarks>
+    public HttpClient? ArtifactDownloadHttpClient { get; init; }
 }
 
 /// <summary>
