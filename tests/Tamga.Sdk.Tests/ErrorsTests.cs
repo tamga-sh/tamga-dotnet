@@ -12,7 +12,8 @@ public class ErrorsTests
     /// <c>status</c> with <c>status.as_u16().to_string()</c>, so the real wire shape is
     /// <c>"status": "422"</c> — a STRING. Binding that to a <c>ushort</c> without
     /// <c>AllowReadingFromString</c> throws, which took out the whole envelope, which meant
-    /// <see cref="TamgaErrorMapper.ToException"/> was never reached and every one of this SDK's
+    /// <see cref="TamgaErrorMapper.ToException(TamgaApiError, Exception?)"/> was never reached and
+    /// every one of this SDK's
     /// typed exceptions was unreachable in production.
     /// </summary>
     [Fact]
@@ -147,5 +148,22 @@ public class ErrorsTests
         var error = new TamgaApiError { Status = 429, Code = "TOO_MANY_REQUESTS", Detail = "detail" };
         var exception = TamgaErrorMapper.ToException(error);
         Assert.IsType<TamgaApiException>(exception);
+    }
+
+    /// <summary>
+    /// Both "base type for a family of typed subclasses" classes must be abstract, and for the
+    /// same reason: the mapper never produces the bare base, so a caller able to construct one
+    /// could hand SDK-shaped code an exception with no meaningful <c>EquivalentValidationCode</c>
+    /// contract behind it. <c>TamgaLicenseAuthException</c> was already abstract;
+    /// <c>TamgaLimitExceededException</c> was not, purely by oversight.
+    /// </summary>
+    [Fact]
+    public void TypedExceptionBaseTypes_AreAbstract_SoOnlyRealSubclassesCanExist()
+    {
+        Assert.True(typeof(TamgaLimitExceededException).IsAbstract);
+        Assert.True(typeof(TamgaLicenseAuthException).IsAbstract);
+
+        // The catch-all base stays concrete on purpose: an unmodeled `code` maps to it directly.
+        Assert.False(typeof(TamgaApiException).IsAbstract);
     }
 }

@@ -272,7 +272,8 @@ public sealed record JsonApiListDocument<TAttributes>
 /// (<c>status.as_u16().to_string()</c>), so the wire shape is <c>"status": "422"</c>, not
 /// <c>"status": 422</c>. Without this flag, <see cref="TamgaApiError.Status"/>
 /// (a <see cref="ushort"/>) fails to bind, the whole <see cref="TamgaApiErrorEnvelope"/>
-/// deserialization throws, and <see cref="TamgaErrorMapper.ToException"/> is never reached — every
+/// deserialization throws, and <see cref="TamgaErrorMapper.ToException(TamgaApiError, Exception?)"/>
+/// is never reached — every
 /// typed exception in this SDK becomes unreachable and every API error degrades to a bare
 /// <see cref="TamgaApiException"/> whose <c>code</c> is the HTTP status name. Do not remove it.
 /// </remarks>
@@ -650,8 +651,11 @@ public sealed class TamgaTransport
     /// one this SDK simply could not bind. Now the server's own <c>code</c>/<c>detail</c> are
     /// recovered from the raw body whenever they are present at all, the synthesized code is
     /// clearly marked (<c>UNPARSEABLE_ERROR_BODY</c>) when they are not, and the underlying
-    /// <see cref="JsonException"/> is preserved as the exception's
-    /// <see cref="Exception.InnerException"/> instead of being swallowed.
+    /// <see cref="JsonException"/> is preserved instead of being swallowed — on BOTH
+    /// <see cref="TamgaApiException.ErrorBodyParseFailure"/> (for SDK-aware callers) and the
+    /// exception's <see cref="Exception.InnerException"/> (for <see cref="Exception.ToString"/>,
+    /// logging sinks and APM agents, which walk that chain automatically and would otherwise never
+    /// see the diagnostic).
     /// </remarks>
     private static TamgaApiException ParseAndMapError(string body, System.Net.HttpStatusCode status)
     {
@@ -680,10 +684,10 @@ public sealed class TamgaTransport
 
         // Still map through the typed mapper: a recovered `code` is exactly as dispatchable as one
         // that bound cleanly, and degrading it to the base type would cost the caller the very
-        // thing the recovery was for.
-        var mapped = TamgaErrorMapper.ToException(error);
-        mapped.ErrorBodyParseFailure = parseFailure;
-        return mapped;
+        // thing the recovery was for. The parse failure has to go in through the constructor —
+        // InnerException cannot be assigned after the fact, and assigning only the typed property
+        // (as this used to) leaves ex.ToString() and every generic log sink blind to it.
+        return TamgaErrorMapper.ToException(error, parseFailure);
     }
 
     /// <summary>

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Tamga.Sdk;
 using Tamga.Sdk.Tests.Support;
 using Xunit;
@@ -294,5 +295,49 @@ public class TransportTests
         Assert.Equal("UNPARSEABLE_ERROR_BODY", ex.Error.Code);
         Assert.Equal("Failed to deserialize query string", ex.Error.Detail);
         Assert.NotNull(ex.ErrorBodyParseFailure);
+    }
+
+    /// <summary>
+    /// The parse failure has to reach BOTH channels. <c>ErrorBodyParseFailure</c> alone is only
+    /// visible to code that knows this SDK's types; <c>ex.ToString()</c>, <c>ILogger</c> sinks and
+    /// APM agents all walk <see cref="Exception.InnerException"/> instead, and would have shown
+    /// nothing but the outer message. Storing it on the property without chaining it through the
+    /// constructor reintroduced the original "diagnostic is invisible" defect one level down.
+    /// </summary>
+    [Fact]
+    public async Task SendJsonApiAsync_ChainsTheEnvelopeParseFailure_AsInnerExceptionToo()
+    {
+        var (transport, handler) = MakeTransport();
+        const string body = """
+        {"errors":[{"id":"1","status":{"unexpected":"object"},"code":"FINGERPRINT_TAKEN","title":"t","detail":"already activated"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.Conflict, body);
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        // Both channels, and both pointing at the very same object.
+        Assert.NotNull(ex.ErrorBodyParseFailure);
+        Assert.NotNull(ex.InnerException);
+        Assert.Same(ex.ErrorBodyParseFailure, ex.InnerException);
+        Assert.IsAssignableFrom<JsonException>(ex.InnerException);
+
+        // The whole point: tooling that only formats the exception still sees the cause.
+        Assert.Contains(nameof(JsonException), ex.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_LeavesInnerExceptionNull_OnTheNormalWellFormedErrorPath()
+    {
+        var (transport, handler) = MakeTransport();
+        handler.Enqueue(
+            HttpStatusCode.Conflict,
+            """{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"t","detail":"already activated"}]}""");
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        Assert.Null(ex.ErrorBodyParseFailure);
+        Assert.Null(ex.InnerException);
     }
 }

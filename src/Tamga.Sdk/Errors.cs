@@ -85,13 +85,31 @@ public class TamgaApiException : Exception
     /// status name — so the one thing a caller could dispatch on was destroyed and the reason was
     /// gone too. This is diagnostic only: dispatch on <see cref="TamgaApiError.Code"/>.
     /// </remarks>
-    public Exception? ErrorBodyParseFailure { get; internal set; }
+    /// <value>
+    /// The same object is also chained as this exception's <see cref="Exception.InnerException"/>,
+    /// so it shows up in <see cref="Exception.ToString"/> and in any logging or APM tooling that
+    /// walks the inner-exception chain without knowing about this SDK.
+    /// </value>
+    public Exception? ErrorBodyParseFailure { get; }
 
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaApiException(TamgaApiError error)
-        : base($"Tamga API error {error.Code} ({error.Status}): {error.Detail}")
+        : this(error, null)
+    {
+    }
+
+    /// <remarks>
+    /// The parse failure is chained through <see cref="Exception.InnerException"/> as well as
+    /// exposed on <see cref="ErrorBodyParseFailure"/>. Both channels are required: the typed
+    /// property is what SDK-aware code reads, while <c>InnerException</c> is what
+    /// <see cref="Exception.ToString"/>, <c>ILogger</c> sinks and APM agents walk automatically —
+    /// setting only the property would leave the diagnostic invisible to every generic tool.
+    /// </remarks>
+    internal TamgaApiException(TamgaApiError error, Exception? errorBodyParseFailure)
+        : base($"Tamga API error {error.Code} ({error.Status}): {error.Detail}", errorBodyParseFailure)
     {
         Error = error;
+        ErrorBodyParseFailure = errorBodyParseFailure;
     }
 }
 
@@ -104,6 +122,8 @@ public sealed class CheckInNotRequiredException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public CheckInNotRequiredException(TamgaApiError error) : base(error) { }
+
+    internal CheckInNotRequiredException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -115,6 +135,8 @@ public sealed class FingerprintTakenException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public FingerprintTakenException(TamgaApiError error) : base(error) { }
+
+    internal FingerprintTakenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>409 PID_TAKEN</c> — a process PID is already in use on the target machine.</summary>
@@ -122,6 +144,8 @@ public sealed class PidTakenException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public PidTakenException(TamgaApiError error) : base(error) { }
+
+    internal PidTakenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>409 KEY_TAKEN</c> — the requested license key is already in use.</summary>
@@ -129,6 +153,8 @@ public sealed class KeyTakenException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public KeyTakenException(TamgaApiError error) : base(error) { }
+
+    internal KeyTakenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -140,6 +166,8 @@ public sealed class TtlInvalidException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TtlInvalidException(TamgaApiError error) : base(error) { }
+
+    internal TtlInvalidException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>422 LICENSE_NOT_ENCRYPTED</c> — <c>encrypt=true</c> was requested but the license has no <c>key</c> set.</summary>
@@ -147,6 +175,8 @@ public sealed class LicenseNotEncryptedException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public LicenseNotEncryptedException(TamgaApiError error) : base(error) { }
+
+    internal LicenseNotEncryptedException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>422 LICENSE_KEY_MISSING</c> — an operation required a license key that is not set.</summary>
@@ -154,6 +184,8 @@ public sealed class LicenseKeyMissingException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public LicenseKeyMissingException(TamgaApiError error) : base(error) { }
+
+    internal LicenseKeyMissingException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -167,6 +199,8 @@ public sealed class SchemeNotSupportedException : TamgaApiException
     /// <summary>Constructs from a parsed API error.</summary>
     public SchemeNotSupportedException(TamgaApiError error) : base(error) { }
 
+    internal SchemeNotSupportedException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
+
     /// <summary>Constructs a purely client-side instance (no server round-trip occurred) for the local machine-file-verify rejection path.</summary>
     public SchemeNotSupportedException(string detail)
         : base(new TamgaApiError { Status = 422, Code = "SCHEME_NOT_SUPPORTED", Detail = detail })
@@ -179,6 +213,8 @@ public sealed class DatasetInvalidException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public DatasetInvalidException(TamgaApiError error) : base(error) { }
+
+    internal DatasetInvalidException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -234,6 +270,8 @@ public sealed class TamgaNotFoundException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaNotFoundException(TamgaApiError error) : base(error) { }
+
+    internal TamgaNotFoundException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>401 UNAUTHORIZED</c>.</summary>
@@ -241,6 +279,8 @@ public sealed class TamgaUnauthorizedException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaUnauthorizedException(TamgaApiError error) : base(error) { }
+
+    internal TamgaUnauthorizedException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>403 FORBIDDEN</c>.</summary>
@@ -248,6 +288,8 @@ public sealed class TamgaForbiddenException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaForbiddenException(TamgaApiError error) : base(error) { }
+
+    internal TamgaForbiddenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -258,6 +300,8 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaInternalServerErrorException(TamgaApiError error) : base(error) { }
+
+    internal TamgaInternalServerErrorException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -277,14 +321,19 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 /// <see cref="EquivalentValidationCode"/> normalizes the two so a caller can dispatch on one value
 /// whichever path it arrived by — see <see cref="TamgaClient.ActivateMachineAsync"/>.
 /// </remarks>
-public class TamgaLimitExceededException : TamgaApiException
+public abstract class TamgaLimitExceededException : TamgaApiException
 {
     /// <summary>The <see cref="ValidationCode"/> a later <c>validate</c> call would report for this same overage.</summary>
     public ValidationCode EquivalentValidationCode { get; }
 
     /// <summary>Constructs from a parsed API error and the validate-time code it corresponds to.</summary>
-    public TamgaLimitExceededException(TamgaApiError error, ValidationCode equivalentValidationCode)
-        : base(error)
+    protected TamgaLimitExceededException(TamgaApiError error, ValidationCode equivalentValidationCode)
+        : this(error, equivalentValidationCode, null)
+    {
+    }
+
+    internal TamgaLimitExceededException(TamgaApiError error, ValidationCode equivalentValidationCode, Exception? errorBodyParseFailure)
+        : base(error, errorBodyParseFailure)
         => EquivalentValidationCode = equivalentValidationCode;
 }
 
@@ -293,6 +342,8 @@ public sealed class MachineLimitExceededException : TamgaLimitExceededException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public MachineLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooManyMachines) { }
+
+    internal MachineLimitExceededException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, ValidationCode.TooManyMachines, errorBodyParseFailure) { }
 }
 
 /// <summary><c>422 CORE_LIMIT_EXCEEDED</c> — CPU-core quota refused at creation time. Validate-time equivalent: <see cref="ValidationCode.TooManyCores"/>.</summary>
@@ -300,6 +351,8 @@ public sealed class CoreLimitExceededException : TamgaLimitExceededException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public CoreLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooManyCores) { }
+
+    internal CoreLimitExceededException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, ValidationCode.TooManyCores, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -316,6 +369,8 @@ public sealed class MemoryLimitExceededException : TamgaLimitExceededException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public MemoryLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooMuchMemory) { }
+
+    internal MemoryLimitExceededException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, ValidationCode.TooMuchMemory, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -327,6 +382,8 @@ public sealed class DiskLimitExceededException : TamgaLimitExceededException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public DiskLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooMuchDisk) { }
+
+    internal DiskLimitExceededException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, ValidationCode.TooMuchDisk, errorBodyParseFailure) { }
 }
 
 /// <summary><c>422 TOO_MANY_PROCESSES</c> — <c>POST /processes</c> refused: the license is at its <c>max_processes</c> limit. Validate-time equivalent: <see cref="ValidationCode.TooManyProcesses"/>.</summary>
@@ -334,6 +391,8 @@ public sealed class TooManyProcessesException : TamgaLimitExceededException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public TooManyProcessesException(TamgaApiError error) : base(error, ValidationCode.TooManyProcesses) { }
+
+    internal TooManyProcessesException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, ValidationCode.TooManyProcesses, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -346,6 +405,8 @@ public sealed class LicenseSuspendedException : TamgaLicenseAuthException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public LicenseSuspendedException(TamgaApiError error) : base(error) { }
+
+    internal LicenseSuspendedException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -363,6 +424,8 @@ public sealed class LicenseExpiredException : TamgaLicenseAuthException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public LicenseExpiredException(TamgaApiError error) : base(error) { }
+
+    internal LicenseExpiredException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -380,6 +443,8 @@ public sealed class LicenseNotAllowedException : TamgaLicenseAuthException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     public LicenseNotAllowedException(TamgaApiError error) : base(error) { }
+
+    internal LicenseNotAllowedException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -391,6 +456,8 @@ public abstract class TamgaLicenseAuthException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
     protected TamgaLicenseAuthException(TamgaApiError error) : base(error) { }
+
+    internal TamgaLicenseAuthException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary>
@@ -411,29 +478,43 @@ public static class TamgaErrorMapper
     /// <summary>Maps a parsed API error to the most specific typed exception matching its <see cref="TamgaApiError.Code"/>.</summary>
     /// <param name="error">The parsed API error to map.</param>
     /// <returns>The typed exception for <paramref name="error"/>'s <c>code</c>, or a base <see cref="TamgaApiException"/> if the code is unmodeled.</returns>
-    public static TamgaApiException ToException(TamgaApiError error) => error.Code switch
+    public static TamgaApiException ToException(TamgaApiError error) => ToException(error, null);
+
+    /// <summary>
+    /// Maps a parsed API error to its typed exception, additionally chaining the failure that
+    /// stopped the server's error envelope from binding.
+    /// </summary>
+    /// <param name="error">The parsed (or raw-body-recovered) API error to map.</param>
+    /// <param name="errorBodyParseFailure">
+    /// The envelope-binding failure, or <see langword="null"/> on the normal path. It is surfaced
+    /// BOTH on <see cref="TamgaApiException.ErrorBodyParseFailure"/> and as the returned
+    /// exception's <see cref="Exception.InnerException"/>, so SDK-aware code and generic logging
+    /// tooling can each find it.
+    /// </param>
+    /// <returns>The typed exception for <paramref name="error"/>'s <c>code</c>, or a base <see cref="TamgaApiException"/> if the code is unmodeled.</returns>
+    public static TamgaApiException ToException(TamgaApiError error, Exception? errorBodyParseFailure) => error.Code switch
     {
-        "CHECK_IN_NOT_REQUIRED" => new CheckInNotRequiredException(error),
-        "FINGERPRINT_TAKEN" => new FingerprintTakenException(error),
-        "PID_TAKEN" => new PidTakenException(error),
-        "KEY_TAKEN" => new KeyTakenException(error),
-        "TTL_INVALID" => new TtlInvalidException(error),
-        "LICENSE_NOT_ENCRYPTED" => new LicenseNotEncryptedException(error),
-        "LICENSE_KEY_MISSING" => new LicenseKeyMissingException(error),
-        "SCHEME_NOT_SUPPORTED" => new SchemeNotSupportedException(error),
-        "DATASET_INVALID" => new DatasetInvalidException(error),
-        "MACHINE_LIMIT_EXCEEDED" => new MachineLimitExceededException(error),
-        "CORE_LIMIT_EXCEEDED" => new CoreLimitExceededException(error),
-        "MEMORY_LIMIT_EXCEEDED" => new MemoryLimitExceededException(error),
-        "DISK_LIMIT_EXCEEDED" => new DiskLimitExceededException(error),
-        "TOO_MANY_PROCESSES" => new TooManyProcessesException(error),
-        "LICENSE_SUSPENDED" => new LicenseSuspendedException(error),
-        "LICENSE_EXPIRED" => new LicenseExpiredException(error),
-        "LICENSE_NOT_ALLOWED" => new LicenseNotAllowedException(error),
-        "NOT_FOUND" => new TamgaNotFoundException(error),
-        "UNAUTHORIZED" => new TamgaUnauthorizedException(error),
-        "FORBIDDEN" => new TamgaForbiddenException(error),
-        "INTERNAL_SERVER_ERROR" => new TamgaInternalServerErrorException(error),
-        _ => new TamgaApiException(error),
+        "CHECK_IN_NOT_REQUIRED" => new CheckInNotRequiredException(error, errorBodyParseFailure),
+        "FINGERPRINT_TAKEN" => new FingerprintTakenException(error, errorBodyParseFailure),
+        "PID_TAKEN" => new PidTakenException(error, errorBodyParseFailure),
+        "KEY_TAKEN" => new KeyTakenException(error, errorBodyParseFailure),
+        "TTL_INVALID" => new TtlInvalidException(error, errorBodyParseFailure),
+        "LICENSE_NOT_ENCRYPTED" => new LicenseNotEncryptedException(error, errorBodyParseFailure),
+        "LICENSE_KEY_MISSING" => new LicenseKeyMissingException(error, errorBodyParseFailure),
+        "SCHEME_NOT_SUPPORTED" => new SchemeNotSupportedException(error, errorBodyParseFailure),
+        "DATASET_INVALID" => new DatasetInvalidException(error, errorBodyParseFailure),
+        "MACHINE_LIMIT_EXCEEDED" => new MachineLimitExceededException(error, errorBodyParseFailure),
+        "CORE_LIMIT_EXCEEDED" => new CoreLimitExceededException(error, errorBodyParseFailure),
+        "MEMORY_LIMIT_EXCEEDED" => new MemoryLimitExceededException(error, errorBodyParseFailure),
+        "DISK_LIMIT_EXCEEDED" => new DiskLimitExceededException(error, errorBodyParseFailure),
+        "TOO_MANY_PROCESSES" => new TooManyProcessesException(error, errorBodyParseFailure),
+        "LICENSE_SUSPENDED" => new LicenseSuspendedException(error, errorBodyParseFailure),
+        "LICENSE_EXPIRED" => new LicenseExpiredException(error, errorBodyParseFailure),
+        "LICENSE_NOT_ALLOWED" => new LicenseNotAllowedException(error, errorBodyParseFailure),
+        "NOT_FOUND" => new TamgaNotFoundException(error, errorBodyParseFailure),
+        "UNAUTHORIZED" => new TamgaUnauthorizedException(error, errorBodyParseFailure),
+        "FORBIDDEN" => new TamgaForbiddenException(error, errorBodyParseFailure),
+        "INTERNAL_SERVER_ERROR" => new TamgaInternalServerErrorException(error, errorBodyParseFailure),
+        _ => new TamgaApiException(error, errorBodyParseFailure),
     };
 }

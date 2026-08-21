@@ -39,7 +39,7 @@ public sealed partial class TamgaClient
 
     /// <summary><c>GET /machines/{id}/components</c> — keyset-paginated (<c>limit</c>/<c>page[after]</c>). Unlike entitlements, the cursor genuinely works here.</summary>
     /// <param name="machineId">The machine whose components to list.</param>
-    /// <param name="limit">Page size, clamped to <c>1..100</c> server-side. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25.</param>
+    /// <param name="limit">Page size, <c>1..100</c>. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25. Values above 100 are clamped to match the server's own clamp; values below 1 are rejected.</param>
     /// <param name="after">The <c>page[after]</c> cursor from a previous page's <see cref="Page{T}.NextCursor"/>.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
@@ -49,10 +49,35 @@ public sealed partial class TamgaClient
     /// signal. That is also why an explicit <c>limit</c> is always sent: with the limit left
     /// implicit there is no number to compare the row count against, and a listing would stop at
     /// the server's default of 25 rows with no indication it had been cut short.
+    ///
+    /// Because the end-of-list signal is a row-count comparison, <paramref name="limit"/> has to
+    /// agree with the limit the server will actually apply, and it must be positive:
+    /// <list type="bullet">
+    /// <item><description>
+    /// A <paramref name="limit"/> above 100 is clamped here to the server's own ceiling. Left
+    /// unclamped, a full 100-row page would never equal the requested count, the cursor would come
+    /// back <see langword="null"/>, and the listing would silently truncate at 100 rows.
+    /// </description></item>
+    /// <item><description>
+    /// A <paramref name="limit"/> of <c>0</c> or less is rejected rather than passed on. Zero in
+    /// particular used to satisfy the fullness test against an empty page (<c>0 == 0</c>) and then
+    /// index <c>[^1]</c> into an empty list, throwing
+    /// <see cref="ArgumentOutOfRangeException"/> from deep inside the mapper.
+    /// </description></item>
+    /// </list>
     /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="limit"/> is less than 1.</exception>
     public async Task<Page<Component>> ListComponentsAsync(Guid machineId, int? limit = null, string? after = null, CancellationToken cancellationToken = default)
     {
-        var effectiveLimit = limit ?? MaxComponentsPageSize;
+        if (limit is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(limit), limit, "Page size must be at least 1; pass null for the default of 100.");
+        }
+
+        // Clamped to the server's ceiling so the fullness comparison below is measured against the
+        // limit the server will actually honour, not the one that was asked for.
+        var effectiveLimit = Math.Min(limit ?? MaxComponentsPageSize, MaxComponentsPageSize);
         var query = BuildPaginationQuery(effectiveLimit, after);
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Get, $"/machines/{machineId}/components", query: query, cancellationToken: cancellationToken).ConfigureAwait(false);
@@ -63,7 +88,9 @@ public sealed partial class TamgaClient
         return new Page<Component>
         {
             Items = doc.Data,
-            NextCursor = doc.Data.Count == effectiveLimit ? doc.Data[^1].Id.ToString() : null,
+            // `>= ` not `==`, and the emptiness guard is load-bearing: it keeps `[^1]` off an empty
+            // list no matter what row count the server returns.
+            NextCursor = doc.Data.Count > 0 && doc.Data.Count >= effectiveLimit ? doc.Data[^1].Id.ToString() : null,
         };
     }
 

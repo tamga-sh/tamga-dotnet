@@ -154,4 +154,63 @@ public class ComponentProcessTests
         await client.ListComponentsAsync(machineId, limit: 1, after: page1.NextCursor);
         Assert.Contains($"page%5Bafter%5D={first}", handler.Requests[1].Request.RequestUri!.Query);
     }
+
+    /// <summary>
+    /// Regression: <c>limit: 0</c> used to satisfy the page-fullness test against an empty page
+    /// (<c>Count 0 == effectiveLimit 0</c>), take the cursor-synthesis branch, and index
+    /// <c>[^1]</c> into an empty list — surfacing as an <see cref="ArgumentOutOfRangeException"/>
+    /// with <c>ParamName "index"</c>, thrown from inside the response mapper long after the real
+    /// mistake. An empty page IS queued here on purpose: it is the exact response that used to
+    /// crash, so this test would still fail if the guard were removed. The limit is now rejected
+    /// at the door instead — <c>ParamName "limit"</c>, and no request sent at all.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ListComponentsAsync_RejectsANonPositiveLimit_BeforeSendingAnything(int limit)
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId), contentType: "application/json");
+
+        var ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            client.ListComponentsAsync(machineId, limit: limit));
+
+        // "limit", not "index" — the caller's mistake, named at the boundary it was made at.
+        Assert.Equal("limit", ex.ParamName);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsNoCursor_OnAnEmptyPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId), contentType: "application/json");
+
+        var page = await client.ListComponentsAsync(machineId, limit: 1);
+
+        Assert.Empty(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    /// <summary>
+    /// The server clamps <c>limit</c> to 100. Without the SDK applying the same clamp, a caller
+    /// asking for 500 got a full 100-row page whose count never equalled the requested limit, so
+    /// the cursor came back <see langword="null"/> and the listing silently truncated at 100 rows
+    /// with no way to tell it had been cut short.
+    /// </summary>
+    [Fact]
+    public async Task ListComponentsAsync_ClampsAnOversizedLimit_SoAFullPageStillYieldsACursor()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var ids = Enumerable.Range(0, 100).Select(_ => Guid.NewGuid()).ToArray();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, ids), contentType: "application/json");
+
+        var page = await client.ListComponentsAsync(machineId, limit: 500);
+
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+        Assert.Equal(ids[^1].ToString(), page.NextCursor);
+    }
 }
