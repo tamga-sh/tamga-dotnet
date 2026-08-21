@@ -379,11 +379,15 @@ public sealed record MachineActivation
 
     /// <summary>
     /// <see langword="true"/> when the server answered <c>409 FINGERPRINT_TAKEN</c> and
-    /// <see cref="Machine"/> is a pre-existing row this call did not create.
+    /// <see cref="Machine"/> is a pre-existing row, on this license, that the call did not create.
     /// </summary>
     /// <remarks>
-    /// Also the flag that suppresses the over-limit rollback: a machine this call did not create is
-    /// never deleted, however the validation comes back. See
+    /// The "on this license" is load-bearing: the lookup behind it is scoped to the license being
+    /// activated, so a conflict caused by a machine on a <em>different</em> license re-throws
+    /// instead of setting this. Read it as "this license already has this machine".
+    ///
+    /// It is also the flag that suppresses the over-limit rollback: a machine this call did not
+    /// create is never deleted, however the validation comes back. See
     /// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>.
     /// </remarks>
     public bool AlreadyActivated { get; init; }

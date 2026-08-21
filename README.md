@@ -119,12 +119,21 @@ if (activation.AlreadyActivated)
 
 Two things it deliberately will not do. It never deletes an adopted machine, even
 when validation comes back over-limit — that seat belongs to something this call
-did not create. And under a policy whose `MachineUniquenessStrategy` is
-`UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT`, the machine it adopts may be
-attached to a *different* license; no machine response carries a license id to
-check that with, so on those policies read `AlreadyActivated` as "this
-fingerprint is spoken for somewhere in the account", not "this fingerprint is
-mine".
+did not create. And it never adopts a machine from a *different* license: the
+lookup is scoped to `LicenseId`, so under a policy whose
+`MachineUniquenessStrategy` is `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the
+scopes where a conflict can come from another license — the scoped search finds
+nothing and the original `FingerprintTakenException` surfaces.
+
+That is the correct outcome, not a gap. Returning another license's machine would
+have this client heartbeat and check out a machine its own license does not own
+while its own `machines_count` stayed at zero, and since the machine resource
+carries no `license_id` it could never detect that. Sharing one fingerprint's
+seat across licenses is precisely what the wider uniqueness scopes exist to
+prevent. Nothing is lost either: all three strategies' duplicate checks include
+the caller's own license rows, so a genuine re-activation conflicts — and is
+found — under every one of them. `AlreadyActivated` therefore means "this license
+already has this machine", the strong reading.
 
 ### Reads
 
@@ -137,7 +146,7 @@ mine".
 | `GetMachineAsync(id)` | `GET /machines/{id}` |
 | `UpdateMachineAsync(id, request)` | `PATCH /machines/{id}` |
 | `ListMachinesAsync(...)` | `GET /machines` — **offset**-paginated |
-| `FindMachineByFingerprintAsync(fp)` | the above, exact-matched client-side |
+| `FindMachineByFingerprintAsync(licenseId, fp)` | the above, license-scoped and exact-matched client-side |
 | `DeleteProcessAsync(id)` | `DELETE /processes/{id}` |
 | `CheckForUpgradeAsync(request)` | `GET /releases/actions/upgrade` |
 | `GetHealthAsync()` | `GET /v1/health` |
@@ -509,10 +518,17 @@ around:
 - **There is no exact-match fingerprint filter on the machine collection.** The
   only fingerprint-aware query parameter is `filter[q]`, a case-insensitive
   substring search that also covers `name` and `hostname`.
-  `FindMachineByFingerprintAsync` sends the fingerprint as a search term and
-  re-checks equality client-side; anything that trusted the server's result set
-  directly could return a machine whose hostname merely contained the
-  fingerprint.
+  `FindMachineByFingerprintAsync` narrows with `filter[license]` plus the
+  fingerprint as a search term and then re-checks equality client-side; anything
+  that trusted the server's result set directly could return a machine whose
+  hostname merely contained the fingerprint.
+- **The unfiltered machine listing is account-wide, not license-scoped**, because
+  no machine route applies the per-license scope check and `LicenseToken` holds
+  `machine.read`. Pass `licenseId` to `ListMachinesAsync` whenever the answer is
+  meant to be about one license — the server will not narrow it for you, and the
+  machine resource carries no `license_id` to narrow it afterwards. This is why
+  `FindMachineByFingerprintAsync` requires a license id rather than offering an
+  account-wide convenience overload.
 - **Nothing on the server deletes process rows.** The process reaper is not
   wired up, so a process row outlives the process it represents until a client
   removes it — and those rows count against `policy.max_processes`. Call

@@ -166,6 +166,21 @@ public class MachineReadTests
         // Offset pagination, not keyset. `page[after]` belongs to the component listing and means
         // nothing here.
         Assert.DoesNotContain("after", query);
+        // No license filter unless one was asked for — the unfiltered listing really is
+        // account-wide, and pretending otherwise would hide that from a caller.
+        Assert.DoesNotContain("filter%5Blicense%5D", query);
+    }
+
+    [Fact]
+    public async Task ListMachinesAsync_SendsTheLicenseFilterWhenGiven()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 1, 1, (Guid.NewGuid(), "fp-a")));
+
+        await client.ListMachinesAsync(licenseId: licenseId);
+
+        Assert.Contains($"filter%5Blicense%5D={licenseId}", handler.Requests[0].Request.RequestUri!.Query);
     }
 
     [Fact]
@@ -266,10 +281,30 @@ public class MachineReadTests
         // The server matched this row on `hostname`/`name`, not on an equal fingerprint.
         handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 1, 1, (decoy, "fp-1-extended")));
 
-        var found = await client.FindMachineByFingerprintAsync("fp-1");
+        var found = await client.FindMachineByFingerprintAsync(Guid.NewGuid(), "fp-1");
 
         Assert.Null(found);
         Assert.Contains("filter%5Bq%5D=fp-1", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    /// <summary>
+    /// The license scope is the safety property, not a convenience filter. An account-wide answer
+    /// could hand back a machine belonging to another license — and since the resource carries no
+    /// license id, the caller could never tell. It would then heartbeat and check out a machine its
+    /// own license does not own while its own machines_count stayed at zero.
+    /// </summary>
+    [Fact]
+    public async Task FindMachineByFingerprintAsync_ScopesTheSearchToTheLicense()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 0, 0));
+
+        await client.FindMachineByFingerprintAsync(licenseId, "fp-1");
+
+        var query = handler.Requests[0].Request.RequestUri!.Query;
+        Assert.Contains($"filter%5Blicense%5D={licenseId}", query);
+        Assert.Contains("filter%5Bq%5D=fp-1", query);
     }
 
     [Fact]
@@ -279,7 +314,7 @@ public class MachineReadTests
         var wanted = Guid.NewGuid();
         handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 2, 1, (Guid.NewGuid(), "fp-10"), (wanted, "fp-1")));
 
-        var found = await client.FindMachineByFingerprintAsync("fp-1");
+        var found = await client.FindMachineByFingerprintAsync(Guid.NewGuid(), "fp-1");
 
         Assert.NotNull(found);
         Assert.Equal(wanted, found!.Id);
@@ -293,7 +328,7 @@ public class MachineReadTests
         handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 2, 2, (Guid.NewGuid(), "fp-1x")));
         handler.Enqueue(HttpStatusCode.OK, MachineListBody(2, 100, 2, 2, (wanted, "fp-1")));
 
-        var found = await client.FindMachineByFingerprintAsync("fp-1");
+        var found = await client.FindMachineByFingerprintAsync(Guid.NewGuid(), "fp-1");
 
         Assert.Equal(wanted, found!.Id);
         Assert.Equal(2, handler.Requests.Count);
@@ -305,7 +340,7 @@ public class MachineReadTests
     {
         var (client, handler) = MakeClient();
 
-        Assert.Null(await client.FindMachineByFingerprintAsync(""));
+        Assert.Null(await client.FindMachineByFingerprintAsync(Guid.NewGuid(), ""));
         Assert.Empty(handler.Requests);
     }
 
@@ -348,6 +383,34 @@ public class MachineReadTests
         Assert.Equal(existing, result.Machine.Id);
         Assert.Equal(ValidationCode.Valid, result.Validation.Code);
         Assert.Equal(3, handler.Requests.Count);
+        // The lookup is scoped to the license being activated, never account-wide.
+        Assert.Contains($"filter%5Blicense%5D={licenseId}", handler.Requests[1].Request.RequestUri!.Query);
+    }
+
+    /// <summary>
+    /// Under UNIQUE_PER_POLICY / UNIQUE_PER_ACCOUNT the conflict can come from a machine on a
+    /// DIFFERENT license. Adopting it would share one fingerprint's seat across licenses — exactly
+    /// what those wider scopes exist to prevent — and the client could never detect it, because the
+    /// machine resource carries no license id. The scoped search finds nothing, so the server's own
+    /// conflict surfaces instead.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineIdempotentAsync_RethrowsACrossLicenseConflict_RatherThanSharingASeat()
+    {
+        var (client, handler) = MakeClient();
+
+        handler.Enqueue(HttpStatusCode.Conflict, FingerprintTakenBody);
+        // The fingerprint IS taken account-wide, but not on the license being activated, so the
+        // license-scoped listing comes back empty.
+        handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 0, 0));
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            client.ActivateMachineIdempotentAsync(
+                new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = Guid.NewGuid() }));
+
+        Assert.Equal("FINGERPRINT_TAKEN", ex.Error.Code);
+        // No validate, no delete, and above all no machine from another license returned.
+        Assert.Equal(2, handler.Requests.Count);
     }
 
     [Fact]
@@ -418,7 +481,7 @@ public class MachineReadTests
     /// second story invented client-side.
     /// </summary>
     [Fact]
-    public async Task ActivateMachineIdempotentAsync_RethrowsWhenNoMachineHoldsTheFingerprint()
+    public async Task ActivateMachineIdempotentAsync_RethrowsWhenTheLicenseHoldsNoSuchFingerprint()
     {
         var (client, handler) = MakeClient();
 

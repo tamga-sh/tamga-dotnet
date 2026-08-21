@@ -278,6 +278,11 @@ public sealed partial class TamgaClient
     /// <c>name</c>, <c>hostname</c> AND <c>fingerprint</c> — not an exact-match filter on any one
     /// of them. See <see cref="FindMachineByFingerprintAsync"/>.
     /// </param>
+    /// <param name="licenseId">
+    /// Restrict the listing to machines on one license, sent as <c>filter[license]</c>. Omitting it
+    /// lists every machine in the account, which a license credential is permitted to do — see the
+    /// remarks.
+    /// </param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
     /// <para>
@@ -293,12 +298,21 @@ public sealed partial class TamgaClient
     /// The server refuses an offset past 100 000 rows with <c>400 PAGE_OUT_OF_RANGE</c>, which at
     /// the maximum page size is page 1001.
     /// </para>
+    /// <para>
+    /// ⚠ <b>The unfiltered listing is account-wide, not license-scoped.</b> No machine route
+    /// applies the per-license scope check that validate and check-out apply, and the
+    /// <c>LicenseToken</c> role holds <c>machine.read</c>, so a client authenticated with one
+    /// license key sees every machine in the account. Pass <paramref name="licenseId"/> whenever
+    /// the answer is supposed to be about one license — the server will not narrow it for you, and
+    /// the machine resource carries no <c>license_id</c> to narrow it afterwards.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="pageNumber"/> or <paramref name="pageSize"/> is less than 1.</exception>
     public async Task<OffsetPage<Machine>> ListMachinesAsync(
         int? pageNumber = null,
         int? pageSize = null,
         string? search = null,
+        Guid? licenseId = null,
         CancellationToken cancellationToken = default)
     {
         if (pageNumber is < 1)
@@ -326,6 +340,11 @@ public sealed partial class TamgaClient
             parts.Add($"filter%5Bq%5D={Uri.EscapeDataString(search)}");
         }
 
+        if (licenseId is { } license)
+        {
+            parts.Add($"filter%5Blicense%5D={license}");
+        }
+
         var doc = await _transport.SendJsonApiListAsync<MachineAttributes>(
             HttpMethod.Get, "/machines", query: string.Join('&', parts), cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -346,27 +365,49 @@ public sealed partial class TamgaClient
     }
 
     /// <summary>
-    /// Finds the machine holding an exact fingerprint, or <see langword="null"/> if the account has
-    /// none.
+    /// Finds the machine on <paramref name="licenseId"/> holding an exact fingerprint, or
+    /// <see langword="null"/> if that license has none.
     /// </summary>
+    /// <param name="licenseId">The license to search within. Required — see the remarks.</param>
     /// <param name="fingerprint">The exact fingerprint to look for.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
     /// <para>
+    /// ⚠ <b>The license scope is not a convenience filter; it is the safety property.</b> The
+    /// account-wide answer to "who holds this fingerprint" is a different and more dangerous
+    /// question, because the machine resource carries no <c>license_id</c> — so a caller handed a
+    /// machine from another license has no way to notice. It would then heartbeat and check out a
+    /// machine its own license does not own, while its own <c>machines_count</c> stayed at zero.
+    /// Seat-sharing across licenses is precisely what the server's wider uniqueness scopes exist to
+    /// prevent (<c>machines/service.rs:47-50</c>), so an SDK must not quietly reconstruct it.
+    /// </para>
+    /// <para>
+    /// Scoping loses nothing, because all three uniqueness strategies' duplicate checks include the
+    /// caller's own license rows: <c>UNIQUE_PER_LICENSE</c> matches on
+    /// <c>license_id = the caller's</c>, <c>UNIQUE_PER_POLICY</c> joins licenses on the policy the
+    /// caller's license shares, and <c>UNIQUE_PER_ACCOUNT</c> covers everything. A genuine
+    /// re-activation of a machine this license already owns therefore produces
+    /// <c>FINGERPRINT_TAKEN</c> under all three, and a license-scoped search finds it every time.
+    /// The only thing an account-wide search would add is the cross-license case — the one the
+    /// server is deliberately refusing.
+    /// </para>
+    /// <para>
     /// ⚠ <b>There is no exact-match fingerprint filter on the machine collection.</b> The only
     /// fingerprint-aware query parameter is <c>filter[q]</c>, a case-insensitive substring search
-    /// that also matches <c>name</c> and <c>hostname</c>. So this sends the fingerprint as a search
-    /// term and then re-checks <see cref="Machine.Fingerprint"/> for exact equality client-side,
-    /// walking pages until it finds a match or runs out. Anything that trusted the search result
-    /// directly could return a machine whose <em>hostname</em> merely contained the fingerprint.
+    /// that also matches <c>name</c> and <c>hostname</c>. So this narrows with
+    /// <c>filter[license]</c> plus the fingerprint as a search term, then re-checks
+    /// <see cref="Machine.Fingerprint"/> for exact equality client-side, walking pages until it
+    /// finds a match or runs out. Anything that trusted the search result directly could return a
+    /// machine whose <em>hostname</em> merely contained the fingerprint. The narrowing and the
+    /// scoping are independent: both err toward a superset, and the client-side equality check is
+    /// what makes the result exact.
     /// </para>
     /// <para>
     /// The comparison is ordinal and case-sensitive, matching how the server stores and uniqueness-
-    /// checks the column. Scoped to the account on the credential; no cross-account read is
-    /// possible.
+    /// checks the column.
     /// </para>
     /// </remarks>
-    public async Task<Machine?> FindMachineByFingerprintAsync(string fingerprint, CancellationToken cancellationToken = default)
+    public async Task<Machine?> FindMachineByFingerprintAsync(Guid licenseId, string fingerprint, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(fingerprint))
         {
@@ -376,7 +417,7 @@ public sealed partial class TamgaClient
         var pageNumber = 1;
         while (true)
         {
-            var page = await ListMachinesAsync(pageNumber, MaxMachinesPageSize, fingerprint, cancellationToken).ConfigureAwait(false);
+            var page = await ListMachinesAsync(pageNumber, MaxMachinesPageSize, fingerprint, licenseId, cancellationToken).ConfigureAwait(false);
             var match = page.Items.FirstOrDefault(m => string.Equals(m.Fingerprint, fingerprint, StringComparison.Ordinal));
             if (match is not null)
             {
@@ -419,13 +460,23 @@ public sealed partial class TamgaClient
     /// not take is the caller's decision, not this method's.
     /// </para>
     /// <para>
-    /// ⚠ <b>The adopted machine is not guaranteed to belong to the license you passed.</b> Under a
-    /// policy whose <see cref="Policy.MachineUniquenessStrategy"/> is <c>UNIQUE_PER_POLICY</c> or
-    /// <c>UNIQUE_PER_ACCOUNT</c>, the conflict can come from a machine attached to a
-    /// <em>different</em> license, and no machine response carries a license id to check that with
-    /// (the resource has no <c>relationships</c> object). On those policies treat
-    /// <see cref="MachineActivation.AlreadyActivated"/> as "this fingerprint is spoken for
-    /// somewhere in the account", not as "this fingerprint is mine".
+    /// ⚠ <b>A cross-license conflict is re-thrown, not adopted.</b> The lookup is scoped to
+    /// <see cref="CreateMachineRequest.LicenseId"/>, so under a policy whose
+    /// <see cref="Policy.MachineUniquenessStrategy"/> is <c>UNIQUE_PER_POLICY</c> or
+    /// <c>UNIQUE_PER_ACCOUNT</c> — where the conflict can come from a machine on a
+    /// <em>different</em> license — no match is found and the original
+    /// <see cref="FingerprintTakenException"/> surfaces. That is the correct outcome, not a gap:
+    /// returning another license's machine would have this client heartbeat and check out a machine
+    /// its own license does not own while its own <c>machines_count</c> stayed at zero, and since
+    /// the resource carries no license id it could never detect that. Sharing one fingerprint's
+    /// seat across licenses is exactly what the wider uniqueness scopes exist to prevent.
+    /// </para>
+    /// <para>
+    /// Scoping costs nothing for the case this method is for. All three uniqueness strategies'
+    /// duplicate checks include the caller's own license rows, so a genuine re-activation of a
+    /// machine this license already owns conflicts under every strategy and is found by the scoped
+    /// search every time. <see cref="MachineActivation.AlreadyActivated"/> therefore means "this
+    /// license already has this machine" — the strong reading, not a hedge.
     /// </para>
     /// <para>
     /// A create-time limit rejection (<c>422</c>) still propagates as a
@@ -433,7 +484,7 @@ public sealed partial class TamgaClient
     /// and nothing to roll back.
     /// </para>
     /// </remarks>
-    /// <exception cref="FingerprintTakenException">The create conflicted and no machine with that exact fingerprint could be found afterwards — so the conflict was not a re-activation this method can resolve. The original error is preserved.</exception>
+    /// <exception cref="FingerprintTakenException">The create conflicted and no machine on <see cref="CreateMachineRequest.LicenseId"/> holds that exact fingerprint — so the conflict came from another license, and adopting its machine would be a seat-sharing bug rather than a re-activation. The server's original error is preserved.</exception>
     /// <exception cref="TamgaLimitExceededException">The server refused the create itself.</exception>
     public async Task<MachineActivation> ActivateMachineIdempotentAsync(
         CreateMachineRequest request,
@@ -449,12 +500,14 @@ public sealed partial class TamgaClient
         }
         catch (FingerprintTakenException)
         {
-            var existing = await FindMachineByFingerprintAsync(request.Fingerprint, cancellationToken).ConfigureAwait(false);
+            var existing = await FindMachineByFingerprintAsync(request.LicenseId, request.Fingerprint, cancellationToken).ConfigureAwait(false);
             if (existing is null)
             {
-                // The conflict is real but not a re-activation of a row we can see — e.g. a
-                // uniqueness scope that reaches rows this credential cannot list. Rethrowing keeps
-                // the server's own code and detail rather than inventing a second story about it.
+                // The conflict is real, but this license does not hold that fingerprint — so it
+                // came from another license under a wider uniqueness scope. Adopting that machine
+                // would share a seat across licenses, which is the thing those scopes exist to
+                // stop. Rethrowing keeps the server's own code and detail rather than inventing a
+                // second story about it.
                 throw;
             }
 
