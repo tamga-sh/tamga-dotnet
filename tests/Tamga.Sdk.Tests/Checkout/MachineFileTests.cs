@@ -255,6 +255,36 @@ public class MachineFileTests
             file.VerifyAndDecrypt(scheme, garbage, "k", "fp", IssuedAt));
     }
 
+    /// <summary>
+    /// The end-to-end form of the off-curve case, and the assertion that actually matters: a
+    /// 65-byte <c>0x04</c> point whose coordinates are not on P-256 has the right SHAPE, so it
+    /// reaches the raw-point import — and the whole call must come back as a failed verification
+    /// on every platform. On Windows/CNG the invalid parameters surface as
+    /// <see cref="PlatformNotSupportedException"/> rather than a
+    /// <see cref="System.Security.Cryptography.CryptographicException"/>, which used to escape
+    /// here while Linux and macOS failed closed.
+    /// </summary>
+    [Fact]
+    public void Verify_FailsClosed_OnAnEcdsaKeyWhosePointIsNotOnTheCurve()
+    {
+        var payloadJson = BuildPayloadJson(Guid.NewGuid(), "fp-abc");
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
+        var (_, sign, alg) = MakeSigner(LicenseScheme.EcdsaP256Sign);
+        var signature = sign(Encoding.UTF8.GetBytes(enc));
+        var file = MachineFile.Parse(BuildPem(enc, signature, alg));
+
+        var notOnCurve = new byte[65];
+        notOnCurve[0] = 0x04;
+        for (var i = 1; i < notOnCurve.Length; i++)
+        {
+            notOnCurve[i] = 0x01;
+        }
+
+        Assert.False(file.Verify(LicenseScheme.EcdsaP256Sign, notOnCurve));
+        Assert.Throws<SignatureVerificationException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.EcdsaP256Sign, notOnCurve, "k", "fp", IssuedAt));
+    }
+
     public static IEnumerable<object[]> AllSchemes()
     {
         yield return new object[] { LicenseScheme.Ed25519Sign };

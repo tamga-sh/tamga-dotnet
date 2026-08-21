@@ -57,7 +57,7 @@ public static class Ecdsa
             {
                 return ECDsa.Create(parameters);
             }
-            catch (Exception ex) when (Rsa.IsMalformedKey(ex))
+            catch (Exception ex) when (IsUnusableKey(ex))
             {
                 return null;
             }
@@ -69,7 +69,7 @@ public static class Ecdsa
             ecdsa.ImportSubjectPublicKeyInfo(publicKey, out _);
             return ecdsa;
         }
-        catch (Exception ex) when (Rsa.IsMalformedKey(ex))
+        catch (Exception ex) when (IsUnusableKey(ex))
         {
             ecdsa.Dispose();
             return null;
@@ -81,6 +81,39 @@ public static class Ecdsa
             throw;
         }
     }
+
+    /// <summary>
+    /// Whether an exception from an EC key import means "these bytes are not a usable public key"
+    /// rather than a real fault — i.e. whether the caller should get <see langword="null"/> and
+    /// fail closed rather than an exception out of a verification call.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Wider than <see cref="Rsa.IsMalformedKey"/> by exactly one case, and that case is
+    /// platform-specific. On Windows/CNG, coordinates that are not a point on the named curve are
+    /// reported as <see cref="PlatformNotSupportedException"/> — "The specified curve 'nistP256' or
+    /// its parameters are not valid for this platform" — wrapping a
+    /// <see cref="System.Security.Cryptography.CryptographicException"/>, whereas OpenSSL and
+    /// CommonCrypto raise a plain <c>CryptographicException</c>. The message is misleading: the
+    /// curve IS supported on Windows, it is the attacker-supplied <em>parameters</em> that are not
+    /// valid.
+    /// </para>
+    /// <para>
+    /// Left uncaught, that made an off-curve key throw out of
+    /// <c>MachineFile.VerifyAndDecrypt</c> on Windows while failing closed with a
+    /// <c>SignatureVerificationException</c> everywhere else — the same input taking two different
+    /// paths on a signature-verification boundary, which is exactly the divergence the three-OS
+    /// test matrix exists to catch.
+    /// </para>
+    /// <para>
+    /// The whole exception type is matched rather than only the wrapping form, deliberately. P-256
+    /// is supported on every platform this SDK targets, so a genuine "this curve is unavailable"
+    /// answer is not a real scenario here; and on a verification path, reporting an unusable key as
+    /// a failed verification is the safe direction to be wrong in, while rethrowing is not.
+    /// </para>
+    /// </remarks>
+    private static bool IsUnusableKey(Exception ex) =>
+        Rsa.IsMalformedKey(ex) || ex is PlatformNotSupportedException;
 
     /// <summary>
     /// Verifies an ECDSA P-256/SHA-256 signature in ASN.1 DER form

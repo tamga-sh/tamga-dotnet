@@ -118,6 +118,12 @@ public class EcdsaTests
             notOnCurve[i] = 0x01;
         }
 
+        // Windows/CNG reports this as PlatformNotSupportedException ("the specified curve
+        // 'nistP256' or its parameters are not valid for this platform") wrapping a
+        // CryptographicException, while OpenSSL and CommonCrypto raise a plain
+        // CryptographicException. Before that was handled, this input returned null on Linux and
+        // macOS and THREW on Windows — the same bytes taking two different paths on a
+        // signature-verification boundary.
         Assert.Null(Ecdsa.TryImportPublicKey(notOnCurve));
     }
 
