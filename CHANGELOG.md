@@ -1,5 +1,36 @@
 # Changelog
 
+## [2.0.3](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.2...v2.0.3) (2026-08-21)
+
+
+### Bug Fixes
+
+* align SDK with the current tamga-api server contract ([927d93e](https://github.com/tamga-sh/tamga-dotnet/commit/927d93ee0081368c3ba5de7927453cf028853777))
+* align the SDK with the current tamga-api server contract ([54fcc51](https://github.com/tamga-sh/tamga-dotnet/commit/54fcc5191218c48d7c805ad0d3fb71b6dcc0df4a))
+* chain envelope parse failures as InnerException, guard component paging ([cca1d12](https://github.com/tamga-sh/tamga-dotnet/commit/cca1d12ab7c2f294251d500f42e4aa6a05b54f61))
+* correct DEAD heartbeat semantics and obsolete Machine.LicenseId ([7045697](https://github.com/tamga-sh/tamga-dotnet/commit/704569718d98b3393dafff942408174ac208de48))
+* correct four route facts the turn-3 spec got wrong ([b42da80](https://github.com/tamga-sh/tamga-dotnet/commit/b42da80a3c933a770bb80f802596ac3afc07f028))
+* correct heartbeat-window docs — policy-driven, 600s is only the fallback ([a931e88](https://github.com/tamga-sh/tamga-dotnet/commit/a931e88a5ff19577e75668566d4c13cb614c8940))
+* correct M5 framing — no heartbeat status ends the ping loop ([6302184](https://github.com/tamga-sh/tamga-dotnet/commit/630218431f7075cd62cfd98f89f84dec2a988913))
+* decode component and process responses as JSON:API documents ([46aec70](https://github.com/tamga-sh/tamga-dotnet/commit/46aec70dad0f49eaa449062ba254d14ea32dcac2))
+* decode component and process responses as the JSON:API documents they are ([633491b](https://github.com/tamga-sh/tamga-dotnet/commit/633491b26a9eda9fa58a7919a0f313686322b430))
+* delete the process rows nothing on the server reaps ([b0bb904](https://github.com/tamga-sh/tamga-dotnet/commit/b0bb90497fa2cf81d5ecd830c82ab9a40588f80c))
+* document the endpoints this SDK can now reach, and one it still cannot ([9709bb2](https://github.com/tamga-sh/tamga-dotnet/commit/9709bb255c2c8347b16ee47d9ca31b1ece1d7bda))
+* exercise the machine-file v2 verification path that shipped untested ([8308fcd](https://github.com/tamga-sh/tamga-dotnet/commit/8308fcd1619cd406eb8bb5c866b2c4126bd16e92))
+* fail closed on an off-curve ECDSA key on Windows, as on Linux and macOS ([de9bbfe](https://github.com/tamga-sh/tamga-dotnet/commit/de9bbfe8c3c00e5022ae978eb0f59e4c083027f5))
+* fall back instead of throwing on a non-positive scheduler interval ([f46094d](https://github.com/tamga-sh/tamga-dotnet/commit/f46094df320f09d946643be99d28d0d20ab4e1c0))
+* floor the heartbeat interval at one second, not merely at positive ([bed12ac](https://github.com/tamga-sh/tamga-dotnet/commit/bed12ac26bd5dbedde7a182c2704d09f61c6ffeb))
+* give activation a way out of its 409, and read the machine resource ([502eb38](https://github.com/tamga-sh/tamga-dotnet/commit/502eb38f293589cdc5695fde2846d06336346239))
+* make offline-proof canonical JSON byte-identical to serde_json ([ff77566](https://github.com/tamga-sh/tamga-dotnet/commit/ff77566e56152d9e47b70b78f68480c4cb7fe334))
+* narrow two overreaching quantifiers in the DEAD and window guidance ([c8f5617](https://github.com/tamga-sh/tamga-dotnet/commit/c8f56173a34a9016740b5e16673c686ac2e0bdf9))
+* pin how the component and process decoders degrade on a malformed body ([01598aa](https://github.com/tamga-sh/tamga-dotnet/commit/01598aaf86178d0f2ef41fc15f7555b5b17c0bf6))
+* reach the endpoint surface this SDK was missing ([30bb853](https://github.com/tamga-sh/tamga-dotnet/commit/30bb853b2419f94b7e8dfdbe39da752dc380fb93))
+* reach the upgrade check and /v1/health ([fdaa953](https://github.com/tamga-sh/tamga-dotnet/commit/fdaa953a2ac14d38c2fd592bd871de0e9391068e))
+* read the licence and policy resources the server already exposes ([d4c3840](https://github.com/tamga-sh/tamga-dotnet/commit/d4c38402c0ecca58ca3867553a9835b89bd8f6e3))
+* scope the fingerprint lookup to the licence being activated ([34c8b34](https://github.com/tamga-sh/tamga-dotnet/commit/34c8b34e341b83844fb4fd21f73a0e12b56b8a6b))
+* verify machine files against the real v2 wire format ([f09c6f6](https://github.com/tamga-sh/tamga-dotnet/commit/f09c6f67b365566740d7fe32489491b3c3af7882))
+* verify machine files against the real v2 wire format ([f297f89](https://github.com/tamga-sh/tamga-dotnet/commit/f297f89b52a82118d0bb555eca70074c1c8bbb78))
+
 ## [2.0.2](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.1...v2.0.2) (2026-08-18)
 
 
