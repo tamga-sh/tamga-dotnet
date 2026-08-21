@@ -228,4 +228,113 @@ public class ProofTests
         var emojiPos = json.IndexOf("-emoji", StringComparison.Ordinal);
         Assert.True(fullwidthPos < emojiPos, json);
     }
+
+    /// <summary>
+    /// The escaping divergences that survived the switch to
+    /// <c>UnsafeRelaxedJsonEscaping</c>. That encoder closed <c>+</c>/<c>&lt;</c>/<c>&gt;</c>/
+    /// <c>&amp;</c>/<c>'</c> and ordinary non-ASCII, but still escaped 1,056,491 scalars that
+    /// <c>serde_json</c> writes raw — every one of which made an authentic proof fail to verify.
+    /// Each case here is one class of that set, and each is a literal round-trip against the exact
+    /// bytes serde_json produces (confirmed against serde_json 1.0.150, the server's pinned
+    /// version).
+    /// </summary>
+    [Theory]
+    [InlineData(0x7F, "U+007F DEL")]
+    [InlineData(0xA0, "U+00A0 NBSP")]
+    [InlineData(0x2028, "U+2028 line separator")]
+    [InlineData(0x2029, "U+2029 paragraph separator")]
+    [InlineData(0x1F600, "U+1F600 emoji (non-BMP)")]
+    [InlineData(0x24B62, "U+24B62 CJK ext-B (non-BMP)")]
+    [InlineData(0xE000, "U+E000 private use")]
+    [InlineData(0xFFFE, "U+FFFE noncharacter")]
+    public void BuildSignedPayload_EmitsRawUtf8_ForScalarsSerdeJsonDoesNotEscape(int scalar, string why)
+    {
+        var raw = char.ConvertFromUtf32(scalar);
+        var dataset = new JsonObject { ["v"] = raw };
+
+        var json = MachineProof.BuildSignedPayload(FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset);
+
+        // Present as the literal character, not as any \uXXXX escape.
+        Assert.True(json.Contains(raw, StringComparison.Ordinal), $"{why}: expected raw, got {json}");
+        Assert.DoesNotContain("\\u", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Control characters below <c>U+0020</c> ARE escaped by both — but <c>serde_json</c> writes
+    /// lowercase hex and every built-in .NET encoder writes uppercase, so <c>\u001f</c> vs
+    /// <c>\u001F</c> was itself a one-byte divergence on any dataset carrying a control character.
+    /// </summary>
+    [Fact]
+    public void BuildSignedPayload_EscapesControlCharacters_WithSerdeJsonsLowercaseHex()
+    {
+        var dataset = new JsonObject { ["v"] = char.ConvertFromUtf32(0x1F) + char.ConvertFromUtf32(0x0B) };
+
+        var json = MachineProof.BuildSignedPayload(FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset);
+
+        Assert.Contains("\\u001f", json, StringComparison.Ordinal);
+        Assert.Contains("\\u000b", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u001F", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\\u000B", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>Short escape forms still match serde_json, and <c>"</c>/<c>\</c> stay escaped — the property that stops a literal input forging an escape sequence.</summary>
+    [Fact]
+    public void BuildSignedPayload_KeepsSerdeJsonShortEscapes_AndAlwaysEscapesQuoteAndBackslash()
+    {
+        var dataset = new JsonObject { ["v"] = "a\tb\nc\rd\"e\\f" };
+
+        var json = MachineProof.BuildSignedPayload(FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset);
+
+        Assert.Contains("a\\tb\\nc\\rd\\\"e\\\\f", json, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// End-to-end: an emoji in the dataset is the realistic trigger. The server signs raw UTF-8;
+    /// before the custom encoder this SDK rebuilt the same payload with an escaped surrogate pair
+    /// and rejected a genuine proof.
+    /// </summary>
+    [Fact]
+    public void Verify_RoundTrips_ForADatasetContainingAnEmojiAndU2028()
+    {
+        using var rsa = RSA.Create(2048);
+        var emoji = char.ConvertFromUtf32(0x1F600);
+        var lineSep = char.ConvertFromUtf32(0x2028);
+        var dataset = new JsonObject { ["mood"] = emoji, ["sep"] = lineSep };
+
+        var serverJson =
+            "{\"account\":{\"id\":\"" + FixtureAccountId + "\"},"
+            + "\"dataset\":{\"mood\":\"" + emoji + "\",\"sep\":\"" + lineSep + "\"},"
+            + "\"machine\":{\"fingerprint\":\"" + FixtureFingerprint + "\",\"id\":\"" + FixtureMachineId + "\"}}";
+        var signature = rsa.SignData(Encoding.UTF8.GetBytes(serverJson), HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var proof = MachineProof.Parse("v1x0." + Convert.ToBase64String(signature));
+
+        Assert.True(proof.Verify(rsa, FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset));
+    }
+
+    /// <summary>
+    /// Regression: <see cref="MachineProof.Verify"/> documents that it fails closed, and it already
+    /// caught the base64 <see cref="FormatException"/> for that reason — but the JSON-writing step
+    /// was unguarded. An unpaired UTF-16 surrogate is valid JSON grammar and
+    /// <c>JsonNode.Parse</c> accepts it, so the realistic air-gapped flow (persist the dataset,
+    /// reload it, verify) handed the caller an <see cref="InvalidOperationException"/> out of the
+    /// writer instead of the promised <see langword="false"/>. Keys throw as well as values.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"a\":\"\\ud800\"}", "lone high surrogate in a value")]
+    [InlineData("{\"a\":\"\\udc00\"}", "lone low surrogate in a value")]
+    [InlineData("{\"a\":{\"b\":[\"\\ud800\"]}}", "lone high surrogate nested in an array")]
+    [InlineData("{\"\\ud800\":1}", "lone high surrogate in a key")]
+    public void Verify_ReturnsFalse_RatherThanThrowing_ForAnUnserializableDataset(string datasetJson, string why)
+    {
+        using var rsa = RSA.Create(2048);
+        var dataset = JsonNode.Parse(datasetJson);
+        Assert.NotNull(dataset);
+
+        var proof = MachineProof.Parse("v1x0." + Convert.ToBase64String(new byte[256]));
+
+        var ex = Record.Exception(() =>
+            Assert.False(proof.Verify(rsa, FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset)));
+
+        Assert.True(ex is null, $"{why}: Verify threw {ex?.GetType().Name} instead of returning false");
+    }
 }
