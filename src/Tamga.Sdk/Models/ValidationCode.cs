@@ -4,9 +4,9 @@ using System.Text.Json.Serialization;
 namespace Tamga.Sdk.Models;
 
 /// <summary>
-/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 24 wire values; only 14
-/// are reachable today (see per-member remarks) — an unrecognized/future wire value deserializes
-/// to <see cref="Unknown"/> rather than throwing (see <see cref="ValidationCodeConverter"/>).
+/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 24 wire values; 16 are
+/// reachable today (see per-member remarks) — an unrecognized/future wire value deserializes to
+/// <see cref="Unknown"/> rather than throwing (see <see cref="ValidationCodeConverter"/>).
 /// </summary>
 [JsonConverter(typeof(ValidationCodeConverter))]
 public enum ValidationCode
@@ -62,7 +62,10 @@ public enum ValidationCode
     /// <summary>Wire value <c>BANNED</c>. ⛔ declared, never emitted.</summary>
     Banned,
 
-    /// <summary>Wire value <c>ENTITLEMENTS_MISSING</c>. ⛔ declared, never emitted.</summary>
+    /// <summary>
+    /// Wire value <c>ENTITLEMENTS_MISSING</c>. ✅ reachable: <see cref="Scope.Entitlements"/> named
+    /// at least one entitlement code the license does not effectively hold.
+    /// </summary>
     EntitlementsMissing,
 
     /// <summary>Wire value <c>TOO_MANY_USERS</c>. ⛔ declared, never emitted.</summary>
@@ -74,16 +77,19 @@ public enum ValidationCode
     /// <summary>Wire value <c>HEARTBEAT_NOT_STARTED</c>. ⛔ declared, never emitted.</summary>
     HeartbeatNotStarted,
 
-    /// <summary>Wire value <c>FINGERPRINT_SCOPE_MISMATCH</c>. ⛔ declared, never emitted (scope field parsed but unchecked).</summary>
+    /// <summary>
+    /// Wire value <c>FINGERPRINT_SCOPE_MISMATCH</c>. ✅ reachable: <see cref="Scope.Fingerprint"/>
+    /// did not match any machine activated against the license.
+    /// </summary>
     FingerprintScopeMismatch,
 
     /// <summary>Wire value <c>COMPONENTS_SCOPE_MISMATCH</c>. ⛔ declared, never emitted.</summary>
     ComponentsScopeMismatch,
 
-    /// <summary>Wire value <c>CHECKSUM_SCOPE_MISMATCH</c>. ⛔ declared, never emitted (scope field parsed but unchecked).</summary>
+    /// <summary>Wire value <c>CHECKSUM_SCOPE_MISMATCH</c>. ⛔ unreachable: sending <c>scope.checksum</c> now fails the whole call with <c>422 SCOPE_NOT_SUPPORTED</c> instead, so this code is never reached.</summary>
     ChecksumScopeMismatch,
 
-    /// <summary>Wire value <c>VERSION_SCOPE_MISMATCH</c>. ⛔ declared, never emitted (scope field parsed but unchecked).</summary>
+    /// <summary>Wire value <c>VERSION_SCOPE_MISMATCH</c>. ⛔ unreachable: sending <c>scope.version</c> now fails the whole call with <c>422 SCOPE_NOT_SUPPORTED</c> instead, so this code is never reached.</summary>
     VersionScopeMismatch,
 }
 

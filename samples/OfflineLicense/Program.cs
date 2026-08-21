@@ -23,6 +23,10 @@ using var client = new TamgaClient(new TamgaClientOptions
 {
     AccountId = accountId,
     BaseUrl = baseUrl,
+    // PREREQUISITE: license-key auth only works if the license's POLICY has
+    // authentication_strategy set to LICENSE or MIXED. That column defaults to 'TOKEN', which
+    // rejects license keys, so a freshly created policy answers 401 LICENSE_NOT_ALLOWED here — a
+    // configuration problem, not a bad key. Fix the policy; retrying will not help.
     Auth = new AuthTransport.License(licenseKey),
 });
 

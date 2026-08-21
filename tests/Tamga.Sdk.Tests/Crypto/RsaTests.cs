@@ -84,4 +84,46 @@ public class RsaTests
 
         Assert.False(Rsa.VerifyPss(rsa, "machine file payload"u8.ToArray(), tooShort));
     }
+
+    // ── TryImportPublicKey ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// The server emits BOTH encodings for the same key — X.509 SubjectPublicKeyInfo from the
+    /// account resource, PKCS#1 RSAPublicKey from <c>license_signing::extract_public_key</c> — so
+    /// accepting only the first would fail every PKCS#1 caller with a result indistinguishable
+    /// from a forged file.
+    /// </summary>
+    [Fact]
+    public void TryImportPublicKey_AcceptsBothEncodingsTheServerCanProduce()
+    {
+        using var key = CreateKey();
+        var message = "machine file payload"u8.ToArray();
+        var signature = key.SignData(message, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+
+        using var fromSpki = Rsa.TryImportPublicKey(key.ExportSubjectPublicKeyInfo());
+        Assert.NotNull(fromSpki);
+        Assert.True(Rsa.VerifyPkcs1(fromSpki!, message, signature));
+
+        using var fromPkcs1 = Rsa.TryImportPublicKey(key.ExportRSAPublicKey());
+        Assert.NotNull(fromPkcs1);
+        Assert.True(Rsa.VerifyPkcs1(fromPkcs1!, message, signature));
+    }
+
+    /// <summary>
+    /// Both import attempts fail: SPKI first, then PKCS#1. The result is <see langword="null"/> —
+    /// "these bytes are not a key" — rather than an exception, so the caller fails closed on a
+    /// verification result instead of on a crash.
+    /// </summary>
+    [Fact]
+    public void TryImportPublicKey_ReturnsNull_WhenBothEncodingsFail()
+    {
+        Assert.Null(Rsa.TryImportPublicKey(new byte[] { 0x30, 0x00, 0xFF }));
+        Assert.Null(Rsa.TryImportPublicKey(ReadOnlySpan<byte>.Empty));
+
+        // A structurally valid DER key of the WRONG algorithm is the realistic version of this: an
+        // ECDSA SPKI is well-formed ASN.1, so it gets past the parser and is refused on algorithm.
+        using var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        Assert.Null(Rsa.TryImportPublicKey(ecdsa.ExportSubjectPublicKeyInfo()));
+    }
+
 }

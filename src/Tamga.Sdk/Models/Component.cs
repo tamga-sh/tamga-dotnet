@@ -36,6 +36,20 @@ public sealed record Component
     /// <summary>When the component was last updated.</summary>
     [JsonPropertyName("updated")]
     public DateTimeOffset? Updated { get; init; }
+
+    /// <summary>
+    /// Flattens a raw JSON:API component resource, taking <see cref="Id"/> from <c>data.id</c> and
+    /// everything else from <c>data.attributes</c>.
+    /// </summary>
+    /// <remarks>
+    /// This type doubles as its own attributes bag: <c>attributes</c> deserializes straight into a
+    /// <see cref="Component"/> (leaving <see cref="Id"/> at its default, since <c>id</c> lives one
+    /// level up as a sibling of <c>attributes</c>) and the id is grafted on here. One property
+    /// list instead of two that can drift — the same shape <see cref="Policy.FromResource"/> uses.
+    /// </remarks>
+    /// <param name="resource">The JSON:API resource object to flatten.</param>
+    public static Component FromResource(JsonApiResource<Component> resource) =>
+        (resource.Attributes ?? new Component()) with { Id = resource.Id };
 }
 
 /// <summary>

@@ -18,19 +18,27 @@ public class MachineTests
         Assert.Equal($"\"{wire}\"", JsonSerializer.Serialize(expected));
     }
 
+    /// <summary>
+    /// <c>Machine.LicenseId</c> is dead for the same reason <c>License</c>'s four relationship ids
+    /// are: the server's machine serializer emits <c>{ type, id, attributes }</c> and nothing else.
+    /// <c>relationships</c> exists on the machine CREATE <em>request</em> body only, never on a
+    /// response, so the property could never have been populated from a real read. It is kept and
+    /// marked <c>[Obsolete]</c> only because deleting a public member is source-breaking; the
+    /// mapper no longer pretends to read it.
+    /// </summary>
     [Fact]
-    public void Machine_FromResource_MapsLicenseRelationship()
+    public void Machine_FromResource_IgnoresRelationships_BecauseTheServerNeverSendsAny()
     {
         var machineId = Guid.NewGuid();
-        var licenseId = Guid.NewGuid();
         var resource = new JsonApiResource<MachineAttributes>
         {
             Type = "machines",
             Id = machineId,
             Attributes = new MachineAttributes { Fingerprint = "fp-1", HeartbeatStatus = HeartbeatStatus.Alive },
+            // Hand-built, since no server response can contain this.
             Relationships = new Dictionary<string, JsonApiRelationship>
             {
-                ["license"] = new JsonApiRelationship { Data = new JsonApiResourceIdentifier { Type = "licenses", Id = licenseId } },
+                ["license"] = new JsonApiRelationship { Data = new JsonApiResourceIdentifier { Type = "licenses", Id = Guid.NewGuid() } },
             },
         };
 
@@ -39,7 +47,10 @@ public class MachineTests
         Assert.Equal(machineId, machine.Id);
         Assert.Equal("fp-1", machine.Fingerprint);
         Assert.Equal(HeartbeatStatus.Alive, machine.HeartbeatStatus);
-        Assert.Equal(licenseId, machine.LicenseId);
+
+#pragma warning disable CS0618 // the point of the test is that this obsolete member stays null
+        Assert.Null(machine.LicenseId);
+#pragma warning restore CS0618
     }
 
     [Theory]

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Text.Json;
 using Tamga.Sdk;
 using Tamga.Sdk.Tests.Support;
 using Xunit;
@@ -209,10 +210,134 @@ public class TransportTests
     public async Task SendJsonApiAsync_ThrowsMappedException_OnErrorStatus()
     {
         var (transport, handler) = MakeTransport();
-        const string body = """{"errors":[{"id":"1","status":422,"code":"TTL_INVALID","title":"t","detail":"d"}]}""";
+        // The server's real wire shape: `status` is a STRING. This is the end-to-end half of the
+        // ErrorsTests regression — it proves the typed mapper is actually reached through the
+        // transport, not just that the envelope binds in isolation.
+        const string body = """{"errors":[{"id":"1","status":"422","code":"TTL_INVALID","title":"t","detail":"d"}]}""";
         handler.Enqueue(HttpStatusCode.UnprocessableEntity, body);
 
-        await Assert.ThrowsAsync<TtlInvalidException>(() =>
+        var ex = await Assert.ThrowsAsync<TtlInvalidException>(() =>
             transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines/1/actions/check-out"));
+
+        Assert.Equal("TTL_INVALID", ex.Error.Code);
+        Assert.Equal((ushort)422, ex.Error.Status);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_ThrowsTypedLimitException_OnACreateTimeQuotaRejection()
+    {
+        var (transport, handler) = MakeTransport();
+        const string body = """
+        {"errors":[{"id":"01926b3e-0000-7000-8000-000000000000","status":"422","code":"MACHINE_LIMIT_EXCEEDED","title":"Unprocessable Entity","detail":"This license has reached its machine limit"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.UnprocessableEntity, body);
+
+        var ex = await Assert.ThrowsAsync<MachineLimitExceededException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        // The server's own code must survive intact — it used to be overwritten with the HTTP
+        // status name ("UnprocessableEntity") on the fallback path.
+        Assert.Equal("MACHINE_LIMIT_EXCEEDED", ex.Error.Code);
+        Assert.Equal("This license has reached its machine limit", ex.Error.Detail);
+        Assert.Equal(Tamga.Sdk.Models.ValidationCode.TooManyMachines, ex.EquivalentValidationCode);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_MapsA401LicenseNotAllowed_ToItsTypedException()
+    {
+        var (transport, handler) = MakeTransport(new AuthTransport.License("lic-key"));
+        // Exactly what a default-policy (`authentication_strategy = 'TOKEN'`) account answers.
+        const string body = """
+        {"errors":[{"id":"01926b3e-0000-7000-8000-000000000001","status":"401","code":"LICENSE_NOT_ALLOWED","title":"Unauthorized","detail":"License key authentication is not allowed for this policy"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.Unauthorized, body);
+
+        var ex = await Assert.ThrowsAsync<LicenseNotAllowedException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/licenses/actions/validate-key"));
+
+        Assert.IsAssignableFrom<TamgaLicenseAuthException>(ex);
+        Assert.Equal("LICENSE_NOT_ALLOWED", ex.Error.Code);
+        Assert.Equal((ushort)401, ex.Error.Status);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_RecoversTheServersCode_WhenTheEnvelopeCannotBeBound()
+    {
+        // A body that is recognizably the error envelope but whose typed binding fails. The old
+        // fallback swallowed the JsonException and replaced the server's `code` with the HTTP
+        // status name, destroying the only value a caller can dispatch on.
+        var (transport, handler) = MakeTransport();
+        const string body = """
+        {"errors":[{"id":"1","status":{"unexpected":"object"},"code":"FINGERPRINT_TAKEN","title":"t","detail":"already activated"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.Conflict, body);
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        // Typed, with the server's code and detail intact...
+        Assert.Equal("FINGERPRINT_TAKEN", ex.Error.Code);
+        Assert.Equal("already activated", ex.Error.Detail);
+
+        // ...and the binding failure kept as a diagnostic rather than swallowed.
+        Assert.NotNull(ex.ErrorBodyParseFailure);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_MarksTheErrorUnparseable_AndKeepsTheCause_WhenNothingCanBeRecovered()
+    {
+        var (transport, handler) = MakeTransport();
+        handler.Enqueue(HttpStatusCode.BadRequest, "Failed to deserialize query string", contentType: "text/plain");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Get, "/releases/actions/upgrade"));
+
+        Assert.Equal("UNPARSEABLE_ERROR_BODY", ex.Error.Code);
+        Assert.Equal("Failed to deserialize query string", ex.Error.Detail);
+        Assert.NotNull(ex.ErrorBodyParseFailure);
+    }
+
+    /// <summary>
+    /// The parse failure has to reach BOTH channels. <c>ErrorBodyParseFailure</c> alone is only
+    /// visible to code that knows this SDK's types; <c>ex.ToString()</c>, <c>ILogger</c> sinks and
+    /// APM agents all walk <see cref="Exception.InnerException"/> instead, and would have shown
+    /// nothing but the outer message. Storing it on the property without chaining it through the
+    /// constructor reintroduced the original "diagnostic is invisible" defect one level down.
+    /// </summary>
+    [Fact]
+    public async Task SendJsonApiAsync_ChainsTheEnvelopeParseFailure_AsInnerExceptionToo()
+    {
+        var (transport, handler) = MakeTransport();
+        const string body = """
+        {"errors":[{"id":"1","status":{"unexpected":"object"},"code":"FINGERPRINT_TAKEN","title":"t","detail":"already activated"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.Conflict, body);
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        // Both channels, and both pointing at the very same object.
+        Assert.NotNull(ex.ErrorBodyParseFailure);
+        Assert.NotNull(ex.InnerException);
+        Assert.Same(ex.ErrorBodyParseFailure, ex.InnerException);
+        Assert.IsAssignableFrom<JsonException>(ex.InnerException);
+
+        // The whole point: tooling that only formats the exception still sees the cause.
+        Assert.Contains(nameof(JsonException), ex.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SendJsonApiAsync_LeavesInnerExceptionNull_OnTheNormalWellFormedErrorPath()
+    {
+        var (transport, handler) = MakeTransport();
+        handler.Enqueue(
+            HttpStatusCode.Conflict,
+            """{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"t","detail":"already activated"}]}""");
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            transport.SendJsonApiAsync<DummyAttributes>(HttpMethod.Post, "/machines"));
+
+        Assert.Null(ex.ErrorBodyParseFailure);
+        Assert.Null(ex.InnerException);
     }
 }

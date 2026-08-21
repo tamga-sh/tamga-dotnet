@@ -51,10 +51,14 @@ public sealed partial class TamgaClient : IDisposable
     // ---------------------------------------------------------------
     // §C License Validation
     //
-    // Auth is currently NOT enforced server-side on any of these 3 endpoints, but this SDK still
-    // always sends the configured Authorization header/query — forward-compatible once
-    // enforcement lands (Tamga API protocol specification gap #3). Nothing special is needed here
-    // beyond what TamgaTransport already applies from TamgaClientOptions.Auth.
+    // Auth IS enforced. License-key auth in particular is off by default: the server accepts an
+    // `Authorization: License <key>` credential only when the license's policy has
+    // `authentication_strategy` set to LICENSE or MIXED, and that column defaults to 'TOKEN'.
+    // Against a default policy every call on a license key answers 401 LICENSE_NOT_ALLOWED
+    // (LicenseNotAllowedException) — a configuration precondition, not a transient failure, so
+    // retrying will not help. Suspended licenses (401 LICENSE_SUSPENDED) and expired licenses
+    // under a REVOKE_ACCESS policy (401 LICENSE_EXPIRED) are refused at the same front door,
+    // before any per-endpoint check runs.
     // ---------------------------------------------------------------
 
     /// <summary><c>POST /licenses/actions/validate-key</c> — validates by raw license key. No scope support.</summary>
@@ -95,8 +99,37 @@ public sealed partial class TamgaClient : IDisposable
     /// <c>GET /licenses/{license_id}/actions/validate</c> — quick-validate. Returns the flat,
     /// non-JSON:API-enveloped <c>{ ts, valid, detail, code }</c> body directly (no license resource).
     /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="ValidateByIdAsync"/>, this route writes <c>last_validated_at</c> only when
+    /// the request carries no <c>Origin</c> header — and the response body is byte-identical either
+    /// way, so a caller cannot tell that the write was skipped. That silence is expensive:
+    /// <c>last_validated_at</c> is what moves a license out of <c>INACTIVE</c>, and it is the
+    /// baseline the server's check-in-overdue sweep measures against, so a client that only ever
+    /// quick-validates over an <c>Origin</c>-bearing transport keeps the license looking inactive
+    /// and overdue forever.
+    ///
+    /// <see cref="AuthTransport.Cookie"/> is the one transport this SDK sends <c>Origin</c> on. So
+    /// when it is configured, this method transparently issues
+    /// <c>POST /licenses/{id}/actions/validate</c> instead (which has no <c>Origin</c> branch) and
+    /// projects its <c>meta</c> onto the same <see cref="QuickValidationResult"/> shape — one
+    /// request either way, same return type, and the timestamp actually gets written. Note that a
+    /// proxy or middleware outside this SDK can add <c>Origin</c> to any transport; if that happens
+    /// the fallback cannot fire, and only <see cref="ValidateByIdAsync"/> is safe.
+    /// </remarks>
     public async Task<QuickValidationResult> QuickValidateAsync(Guid licenseId, CancellationToken cancellationToken = default)
     {
+        if (Options.Auth is AuthTransport.Cookie)
+        {
+            var validated = await ValidateByIdAsync(licenseId, cancellationToken: cancellationToken).ConfigureAwait(false);
+            return new QuickValidationResult
+            {
+                Ts = validated.Meta.Ts,
+                Valid = validated.Meta.Valid,
+                Detail = validated.Meta.Detail,
+                Code = validated.Meta.Code,
+            };
+        }
+
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Get,
             $"/licenses/{licenseId}/actions/validate",
@@ -106,6 +139,42 @@ public sealed partial class TamgaClient : IDisposable
 
         return JsonSerializer.Deserialize<QuickValidationResult>(body, TamgaJsonOptions.Default)
             ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Quick-validate returned an empty body." });
+    }
+
+    /// <summary>
+    /// <c>GET /licenses/{license_id}</c> — reads a license resource without validating it.
+    /// </summary>
+    /// <param name="licenseId">The license to read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// A plain read: it does not touch <c>last_validated_at</c>, does not run scope or limit
+    /// checks, and returns no <see cref="ValidationMeta"/>. Use it to inspect the stored record —
+    /// expiry, seat counts, suspension — not to decide whether the license is usable. That
+    /// decision is <see cref="ValidateByIdAsync"/>'s, and only validation applies the policy.
+    /// </para>
+    /// <para>
+    /// <see cref="License.Status"/> is derived server-side at serialization time rather than
+    /// stored, so it does reflect expiry and suspension. It still says nothing about machine,
+    /// core, memory, disk or process limits.
+    /// </para>
+    /// <para>
+    /// ⚠ The response includes <see cref="License.Key"/> in plaintext, and this route does not
+    /// confine a license credential to its own license — see the note at the top of
+    /// <c>Client.Policies.cs</c>.
+    /// </para>
+    /// <para>
+    /// The four id properties on <see cref="License"/> stay <see langword="null"/> here as
+    /// everywhere else: the serializer emits no <c>relationships</c> object and no <c>policy_id</c>
+    /// attribute. <see cref="GetLicensePolicyAsync"/> is the only way from a license to its policy.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such license in this account.</exception>
+    public async Task<License> GetLicenseAsync(Guid licenseId, CancellationToken cancellationToken = default)
+    {
+        var doc = await _transport.SendJsonApiAsync<LicenseAttributes>(
+            HttpMethod.Get, $"/licenses/{licenseId}", cancellationToken: cancellationToken).ConfigureAwait(false);
+        return MapLicense(doc);
     }
 
     // ---------------------------------------------------------------

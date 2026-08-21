@@ -27,17 +27,32 @@ public class ComponentProcessTests
         await Assert.ThrowsAsync<FingerprintTakenException>(() => client.CreateComponentAsync(request));
     }
 
+    /// <summary>
+    /// The request body really is flat — that half of the asymmetry is right and must stay. The
+    /// RESPONSE is not: <c>component_created_response</c> answers <c>201</c> with a full JSON:API
+    /// document. Decoding the response as if it mirrored the request is what produced components
+    /// with <c>Guid.Empty</c> ids and empty strings, silently, because
+    /// <c>TamgaJsonOptions.Default</c> sets no <c>UnmappedMemberHandling</c> and so the unknown
+    /// <c>data</c> key was simply ignored.
+    /// </summary>
     [Fact]
-    public async Task CreateComponentAsync_SendsFlatNonEnvelopedBody()
+    public async Task CreateComponentAsync_SendsAFlatBody_AndDecodesAnEnvelopedResponse()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
         var componentId = Guid.NewGuid();
-        handler.Enqueue(HttpStatusCode.OK, $$"""{"id":"{{componentId}}","machine_id":"{{machineId}}","fingerprint":"fp-c","name":"cpu"}""", contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.Created, ComponentBody(componentId, machineId));
 
         var component = await client.CreateComponentAsync(new CreateComponentRequest { MachineId = machineId, Fingerprint = "fp-c", Name = "cpu" });
 
         Assert.Equal(componentId, component.Id);
+        Assert.Equal(machineId, component.MachineId);
+        Assert.Equal("fp-c", component.Fingerprint);
+        Assert.Equal("cpu", component.Name);
+        Assert.NotNull(component.Metadata);
+        Assert.NotNull(component.Created);
+        Assert.NotNull(component.Updated);
+
         var body = handler.Requests[0].Body!;
         Assert.DoesNotContain("\"data\"", body);
         Assert.DoesNotContain("\"attributes\"", body);
@@ -54,17 +69,25 @@ public class ComponentProcessTests
     }
 
     [Fact]
-    public async Task CreateProcessAsync_SendsPidAsJsonString()
+    public async Task CreateProcessAsync_SendsAFlatBody_AndDecodesAnEnvelopedResponse()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
         var processId = Guid.NewGuid();
-        handler.Enqueue(HttpStatusCode.OK, $$"""{"id":"{{processId}}","machine_id":"{{machineId}}","pid":"1234"}""", contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.Created, ProcessBody(processId, machineId, "1234"));
 
         var process = await client.CreateProcessAsync(machineId, "1234");
 
+        Assert.Equal(processId, process.Id);
+        Assert.Equal(machineId, process.MachineId);
         Assert.Equal("1234", process.Pid);
-        Assert.Contains("\"pid\":\"1234\"", handler.Requests[0].Body!);
+        Assert.NotNull(process.Metadata);
+        Assert.NotNull(process.Created);
+        Assert.NotNull(process.Updated);
+
+        var body = handler.Requests[0].Body!;
+        Assert.Contains("\"pid\":\"1234\"", body);
+        Assert.DoesNotContain("\"data\"", body);
     }
 
     [Fact]
@@ -72,46 +95,454 @@ public class ComponentProcessTests
     {
         var (client, handler) = MakeClient();
         var processId = Guid.NewGuid();
-        handler.Enqueue(HttpStatusCode.OK, $$"""{"id":"{{processId}}","machine_id":"{{Guid.NewGuid()}}","pid":"1"}""", contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.OK, ProcessBody(processId, Guid.NewGuid(), "1"));
 
         var process = await client.PingProcessAsync(processId);
         Assert.Equal(processId, process.Id);
     }
 
+    /// <summary>
+    /// The ping writes <c>last_heartbeat_at = NOW()</c> and the serializer emits it as a non-null
+    /// attribute. Without a property to bind it to, the one fact the call establishes — that the
+    /// server recorded this ping, and when — could not reach the caller at all.
+    /// </summary>
     [Fact]
-    public async Task ListComponentsAsync_ThreadsKeysetPaginationCursor_AcrossMultiplePages()
+    public async Task PingProcessAsync_SurfacesTheHeartbeatTimestampTheServerJustWrote()
+    {
+        var (client, handler) = MakeClient();
+        var processId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessBody(processId, Guid.NewGuid(), "1"));
+
+        var process = await client.PingProcessAsync(processId);
+
+        Assert.NotNull(process.LastHeartbeatAt);
+        Assert.Equal(2026, process.LastHeartbeatAt!.Value.Year);
+    }
+
+    // The real wire shape, per components/serializer.rs: a JSON:API resource object per row —
+    // { type, id, attributes } — with machine_id/fingerprint/name/metadata/created/updated INSIDE
+    // `attributes`, not at the element root. These fixtures previously put those fields at the
+    // root, which is why four decode paths could be wrong and CI stayed green for the entire life
+    // of the SDK.
+    //
+    // `data` only: every serializer passes `links: None` and the field is skip_serializing_if
+    // none, so no response ever carries a `links` key — which is why the cursor has to be
+    // synthesized from the last item of a full page instead.
+    private static JsonNode ComponentResource(Guid id, Guid machineId) => new JsonObject
+    {
+        ["type"] = "components",
+        ["id"] = id.ToString(),
+        ["attributes"] = new JsonObject
+        {
+            ["fingerprint"] = "fp-c",
+            ["name"] = "cpu",
+            ["machine_id"] = machineId.ToString(),
+            ["metadata"] = new JsonObject { ["slot"] = "0" },
+            ["created"] = "2026-01-02T03:04:05Z",
+            ["updated"] = "2026-01-02T03:04:06Z",
+        },
+    };
+
+    private static string ComponentBody(Guid id, Guid machineId) =>
+        new JsonObject { ["data"] = ComponentResource(id, machineId) }.ToJsonString();
+
+    private static string ComponentListBody(Guid machineId, params Guid[] ids) => new JsonObject
+    {
+        ["data"] = new JsonArray(ids.Select(id => ComponentResource(id, machineId)).ToArray()),
+    }.ToJsonString();
+
+    private static JsonNode ProcessResource(Guid id, Guid machineId, string pid) => new JsonObject
+    {
+        ["type"] = "processes",
+        ["id"] = id.ToString(),
+        ["attributes"] = new JsonObject
+        {
+            ["pid"] = pid,
+            ["machine_id"] = machineId.ToString(),
+            ["last_heartbeat_at"] = "2026-01-02T03:04:05Z",
+            ["metadata"] = new JsonObject { ["role"] = "worker" },
+            ["created"] = "2026-01-02T03:04:05Z",
+            ["updated"] = "2026-01-02T03:04:06Z",
+        },
+    };
+
+    private static string ProcessBody(Guid id, Guid machineId, string pid) =>
+        new JsonObject { ["data"] = ProcessResource(id, machineId, pid) }.ToJsonString();
+
+    private static string ProcessListBody(Guid machineId, params Guid[] ids) => new JsonObject
+    {
+        ["data"] = new JsonArray(ids.Select(id => ProcessResource(id, machineId, "1")).ToArray()),
+    }.ToJsonString();
+
+    [Fact]
+    public async Task ListComponentsAsync_SynthesizesTheCursorFromTheLastItemOfAFullPage()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
-        var componentId1 = Guid.NewGuid();
-        var componentId2 = Guid.NewGuid();
+        var ids = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid()).ToArray();
 
-        var page1Body = new JsonObject
-        {
-            ["data"] = new JsonArray
-            {
-                new JsonObject { ["id"] = componentId1.ToString(), ["machine_id"] = machineId.ToString(), ["fingerprint"] = "fp-1", ["name"] = "cpu" },
-            },
-            ["links"] = new JsonObject { ["next"] = "/machines/x/components?page%5Bafter%5D=cursor-1" },
-        }.ToJsonString();
-        var page2Body = new JsonObject
-        {
-            ["data"] = new JsonArray
-            {
-                new JsonObject { ["id"] = componentId2.ToString(), ["machine_id"] = machineId.ToString(), ["fingerprint"] = "fp-2", ["name"] = "ram" },
-            },
-            ["links"] = new JsonObject(),
-        }.ToJsonString();
-        handler.Enqueue(HttpStatusCode.OK, page1Body, contentType: "application/json");
-        handler.Enqueue(HttpStatusCode.OK, page2Body, contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, ids));
 
-        var page1 = await client.ListComponentsAsync(machineId);
-        Assert.Single(page1.Items);
-        Assert.Equal("cursor-1", page1.NextCursor);
+        var page = await client.ListComponentsAsync(machineId, limit: 3);
 
-        var page2 = await client.ListComponentsAsync(machineId, after: page1.NextCursor);
-        Assert.Single(page2.Items);
+        Assert.Equal(3, page.Items.Count);
+        Assert.Equal(ids[^1].ToString(), page.NextCursor);
+        Assert.Contains("limit=3", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    /// <summary>
+    /// The list path loses attributes but NOT the id, and the distinction matters for how bad the
+    /// bug is. JSON:API puts <c>id</c> at the resource root, a sibling of <c>attributes</c> — so a
+    /// flat decode still binds <see cref="Component.Id"/> correctly and the synthesized cursor
+    /// stays a real UUID. What it loses is everything under <c>attributes</c>:
+    /// <c>machine_id</c>, <c>fingerprint</c>, <c>name</c>, <c>metadata</c>, <c>created</c>,
+    /// <c>updated</c> — so a caller got the right number of components, with the right ids, and
+    /// nothing else.
+    /// </summary>
+    [Fact]
+    public async Task ListComponentsAsync_BindsEveryAttribute_NotJustTheId()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var componentId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, componentId));
+
+        var page = await client.ListComponentsAsync(machineId, limit: 1);
+
+        var component = Assert.Single(page.Items);
+        Assert.Equal(componentId, component.Id);
+        Assert.Equal(machineId, component.MachineId);
+        Assert.Equal("fp-c", component.Fingerprint);
+        Assert.Equal("cpu", component.Name);
+        Assert.NotNull(component.Metadata);
+        Assert.NotNull(component.Created);
+        Assert.NotNull(component.Updated);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsNoCursor_OnAPartialPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()));
+
+        var page = await client.ListComponentsAsync(machineId, limit: 3);
+
+        Assert.Single(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_SendsAnExplicitLimit_SoAFullPageIsDetectable()
+    {
+        // With the limit left implicit the server applies its own default of 25 and there is no
+        // number to compare the row count against, so a truncated listing looks complete.
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()));
+
+        await client.ListComponentsAsync(machineId);
+
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ThreadsTheSynthesizedCursorBackAsPageAfter()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var first = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, first));
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()));
+
+        var page1 = await client.ListComponentsAsync(machineId, limit: 1);
+        Assert.Equal(first.ToString(), page1.NextCursor);
+
+        await client.ListComponentsAsync(machineId, limit: 1, after: page1.NextCursor);
+        Assert.Contains($"page%5Bafter%5D={first}", handler.Requests[1].Request.RequestUri!.Query);
+    }
+
+    /// <summary>
+    /// Regression: <c>limit: 0</c> used to satisfy the page-fullness test against an empty page
+    /// (<c>Count 0 == effectiveLimit 0</c>), take the cursor-synthesis branch, and index
+    /// <c>[^1]</c> into an empty list — surfacing as an <see cref="ArgumentOutOfRangeException"/>
+    /// with <c>ParamName "index"</c>, thrown from inside the response mapper long after the real
+    /// mistake. An empty page IS queued here on purpose: it is the exact response that used to
+    /// crash, so this test would still fail if the guard were removed. The limit is now rejected
+    /// at the door instead — <c>ParamName "limit"</c>, and no request sent at all.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ListComponentsAsync_RejectsANonPositiveLimit_BeforeSendingAnything(int limit)
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId));
+
+        var ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            client.ListComponentsAsync(machineId, limit: limit));
+
+        // "limit", not "index" — the caller's mistake, named at the boundary it was made at.
+        Assert.Equal("limit", ex.ParamName);
+        Assert.Empty(handler.Requests);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsNoCursor_OnAnEmptyPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId));
+
+        var page = await client.ListComponentsAsync(machineId, limit: 1);
+
+        Assert.Empty(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    // ── Degradation on a malformed 2xx body ──────────────────────────────────
+    //
+    // A 2xx whose body is not the document these routes promise is a server or proxy fault, not a
+    // caller mistake. It must still arrive as a typed TamgaApiException carrying a dispatchable
+    // code — never as a raw JsonException from inside the mapper, and never as an object full of
+    // defaults, which is exactly the failure mode this whole change exists to remove.
+
+    [Fact]
+    public async Task CreateComponentAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateComponentAsync(new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" }));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.ListComponentsAsync(Guid.NewGuid(), limit: 1));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateComponentAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateComponentAsync(new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" }));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateProcessAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateProcessAsync(Guid.NewGuid(), "1"));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task PingProcessAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() => client.PingProcessAsync(Guid.NewGuid()));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    /// <summary>
+    /// A resource object with no <c>attributes</c> at all still has to yield a usable id rather
+    /// than throwing — <c>id</c> lives at the resource root, so it is present even when the
+    /// attributes bag is not.
+    /// </summary>
+    [Fact]
+    public async Task CreateComponentAsync_KeepsTheId_WhenTheResourceCarriesNoAttributes()
+    {
+        var (client, handler) = MakeClient();
+        var componentId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.Created, "{\"data\":{\"type\":\"components\",\"id\":\"" + componentId + "\"}}");
+
+        var component = await client.CreateComponentAsync(
+            new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" });
+
+        Assert.Equal(componentId, component.Id);
+        Assert.Equal("", component.Fingerprint);
+    }
+
+    [Fact]
+    public async Task PingProcessAsync_KeepsTheId_WhenTheResourceCarriesNoAttributes()
+    {
+        var (client, handler) = MakeClient();
+        var processId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, "{\"data\":{\"type\":\"processes\",\"id\":\"" + processId + "\"}}");
+
+        var process = await client.PingProcessAsync(processId);
+
+        Assert.Equal(processId, process.Id);
+        Assert.Equal("", process.Pid);
+        Assert.Null(process.LastHeartbeatAt);
+    }
+
+    // ── GET /machines/{id}/processes ─────────────────────────────────────────
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_BindsEveryAttribute()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var processId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId, processId));
+
+        var page = await client.ListMachineProcessesAsync(machineId, limit: 1);
+
+        var process = Assert.Single(page.Items);
+        Assert.Equal(processId, process.Id);
+        Assert.Equal(machineId, process.MachineId);
+        Assert.Equal("1", process.Pid);
+        Assert.NotNull(process.LastHeartbeatAt);
+        Assert.NotNull(process.Metadata);
+        Assert.NotNull(process.Created);
+        Assert.NotNull(process.Updated);
+
+        var request = handler.Requests[0].Request;
+        Assert.Equal(HttpMethod.Get, request.Method);
+        Assert.Equal($"/v1/accounts/acct-1/machines/{machineId}/processes", request.RequestUri!.AbsolutePath);
+    }
+
+    /// <summary>
+    /// Keyset, like components — the server emits no <c>meta.page</c> on this route, so the cursor
+    /// is synthesized from a full page rather than read.
+    /// </summary>
+    [Fact]
+    public async Task ListMachineProcessesAsync_SynthesizesAKeysetCursor_AndThreadsItBack()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var first = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId, first));
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId));
+
+        var page1 = await client.ListMachineProcessesAsync(machineId, limit: 1);
+        Assert.Equal(first.ToString(), page1.NextCursor);
+
+        var page2 = await client.ListMachineProcessesAsync(machineId, limit: 1, after: page1.NextCursor);
         Assert.Null(page2.NextCursor);
-        Assert.Contains("page%5Bafter%5D=cursor-1", handler.Requests[1].Request.RequestUri!.Query);
+        Assert.Contains($"page%5Bafter%5D={first}", handler.Requests[1].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_SendsAnExplicitLimit_AndClampsAnOversizedOne()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId));
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId));
+
+        await client.ListMachineProcessesAsync(machineId);
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+
+        await client.ListMachineProcessesAsync(machineId, limit: 500);
+        Assert.Contains("limit=100", handler.Requests[1].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_ReportsNoCursor_OnAnEmptyPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId));
+
+        var page = await client.ListMachineProcessesAsync(machineId, limit: 1);
+
+        Assert.Empty(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.ListMachineProcessesAsync(Guid.NewGuid(), limit: 1));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task ListMachineProcessesAsync_RejectsANonPositiveLimit_BeforeSendingAnything(int limit)
+    {
+        var (client, handler) = MakeClient();
+
+        var ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
+            client.ListMachineProcessesAsync(Guid.NewGuid(), limit: limit));
+
+        Assert.Equal("limit", ex.ParamName);
+        Assert.Empty(handler.Requests);
+    }
+
+    /// <summary>
+    /// The infinite-loop guard. An all-zero id sorts before every UUIDv7 row, so feeding one back
+    /// as <c>page[after]</c> returns the same first page again and a caller looping until
+    /// <c>NextCursor</c> is null never terminates. No correct decode can produce an empty id — but
+    /// a decode bug can, and did, silently. A truncated listing is a bad outcome; a non-terminating
+    /// loop is a worse one, so an empty id ends the walk instead of restarting it.
+    /// </summary>
+    [Fact]
+    public async Task ListComponentsAsync_RefusesToSynthesizeAnAllZeroCursor()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        // A full page whose single row carries no id at all.
+        const string body = """{"data":[{"type":"components","attributes":{"fingerprint":"fp-c","name":"cpu"}}]}""";
+        handler.Enqueue(HttpStatusCode.OK, body);
+
+        var page = await client.ListComponentsAsync(machineId, limit: 1);
+
+        Assert.Single(page.Items);
+        Assert.Equal(Guid.Empty, page.Items[0].Id);
+        Assert.Null(page.NextCursor);
+    }
+
+    /// <summary>
+    /// The server clamps <c>limit</c> to 100. Without the SDK applying the same clamp, a caller
+    /// asking for 500 got a full 100-row page whose count never equalled the requested limit, so
+    /// the cursor came back <see langword="null"/> and the listing silently truncated at 100 rows
+    /// with no way to tell it had been cut short.
+    /// </summary>
+    [Fact]
+    public async Task ListComponentsAsync_ClampsAnOversizedLimit_SoAFullPageStillYieldsACursor()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var ids = Enumerable.Range(0, 100).Select(_ => Guid.NewGuid()).ToArray();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, ids));
+
+        var page = await client.ListComponentsAsync(machineId, limit: 500);
+
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+        Assert.Equal(ids[^1].ToString(), page.NextCursor);
     }
 }

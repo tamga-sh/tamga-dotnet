@@ -31,6 +31,20 @@ public sealed record Process
     [JsonPropertyName("pid")]
     public string Pid { get; init; } = "";
 
+    /// <summary>
+    /// When the server last recorded a heartbeat for this process. Non-null on every response —
+    /// the column is <c>NOT NULL</c> and a process is created with it already set.
+    /// </summary>
+    /// <remarks>
+    /// On a <see cref="TamgaClient.PingProcessAsync"/> response this is the timestamp that call
+    /// just wrote, so it is the one durable confirmation that the server recorded the ping. There
+    /// is deliberately no heartbeat-STATUS field to go with it: unlike a machine, a process that
+    /// misses its window is deleted outright rather than tracked through <c>DEAD</c> /
+    /// <c>RESURRECTED</c>, so the only states are "row exists" and "404".
+    /// </remarks>
+    [JsonPropertyName("last_heartbeat_at")]
+    public DateTimeOffset? LastHeartbeatAt { get; init; }
+
     /// <summary>Arbitrary caller-supplied metadata attached to the process.</summary>
     [JsonPropertyName("metadata")]
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
@@ -42,6 +56,18 @@ public sealed record Process
     /// <summary>When the process was last updated.</summary>
     [JsonPropertyName("updated")]
     public DateTimeOffset? Updated { get; init; }
+
+    /// <summary>
+    /// Flattens a raw JSON:API process resource, taking <see cref="Id"/> from <c>data.id</c> and
+    /// everything else from <c>data.attributes</c>.
+    /// </summary>
+    /// <remarks>
+    /// This type doubles as its own attributes bag — see <see cref="Component.FromResource"/> for
+    /// why.
+    /// </remarks>
+    /// <param name="resource">The JSON:API resource object to flatten.</param>
+    public static Process FromResource(JsonApiResource<Process> resource) =>
+        (resource.Attributes ?? new Process()) with { Id = resource.Id };
 }
 
 /// <summary>

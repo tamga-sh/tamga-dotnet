@@ -9,6 +9,18 @@
       exist until .NET 9.
     -->
     <TargetFramework>net8.0</TargetFramework>
+    <!--
+      Required by exactly one type: CanonicalJson.SerdeJsonEscaper in Proof.cs.
+      System.Text.Encodings.Web.TextEncoder's extension points
+      (TryEncodeUnicodeScalar / FindFirstCharacterToEncode) are declared with
+      char* parameters, so a custom encoder cannot be written without this.
+      That encoder is the only unsafe code in this assembly, its two unsafe
+      methods bounds-check every write, and there is no other way to make the
+      offline-proof canonical JSON byte-identical to serde_json — see the
+      escaping notes on CanonicalJson. Do not use this flag as licence to add
+      pointer code elsewhere.
+    -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <RootNamespace>Tamga.Sdk</RootNamespace>
     <AssemblyName>Tamga.Sdk</AssemblyName>
   </PropertyGroup>

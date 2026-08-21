@@ -33,6 +33,22 @@ public class RateLimitTests
         Assert.True(TamgaTransport.IsRetryable(HttpMethod.Post, "/v1/accounts/acc/machines/x/actions/ping"));
     }
 
+    /// <summary>
+    /// Heartbeat writes must be retried. Neither <c>/actions/ping-heartbeat</c> nor
+    /// <c>/actions/reset-heartbeat</c> ends with the <c>/actions/ping</c> suffix — that one is the
+    /// PROCESS ping route — so both fell outside the retry list, and a throttled heartbeat was
+    /// dropped silently. A dropped heartbeat flips a machine to <c>DEAD</c>, and on a policy that
+    /// actually sets <c>require_heartbeat</c> (it defaults to <c>FALSE</c>) eventually gets it
+    /// culled. Both are bare idempotent state writes server-side, so repeating them cannot burn a
+    /// seat.
+    /// </summary>
+    [Fact]
+    public void HeartbeatWritesAreRetryable()
+    {
+        Assert.True(TamgaTransport.IsRetryable(HttpMethod.Post, "/v1/accounts/acc/machines/m-1/actions/ping-heartbeat"));
+        Assert.True(TamgaTransport.IsRetryable(HttpMethod.Post, "/v1/accounts/acc/machines/m-1/actions/reset-heartbeat"));
+    }
+
     [Fact]
     public void OtherMethodsAreNotRetried()
     {
@@ -59,6 +75,18 @@ public class RateLimitTests
     {
         // Guessing the same short delay every time is just the original burst again.
         Assert.True(TamgaTransport.RetryDelay(2, null) > TamgaTransport.RetryDelay(0, null));
+    }
+
+    [Fact]
+    public void TheDefaultTimeoutSitsOutsideTheServersOwnDeadline()
+    {
+        // The server applies a 30s TimeoutLayer of its own. Matching it exactly makes the two race,
+        // and a slow request then usually surfaces as a local cancellation rather than the
+        // server's 504 — which is the response that actually carries the X-Request-Id a support
+        // ticket needs.
+        var options = new TamgaClientOptions { AccountId = "acct-1", BaseUrl = "https://api.tamga.test" };
+
+        Assert.True(options.Timeout > TimeSpan.FromSeconds(30), $"default timeout was {options.Timeout}");
     }
 
     [Fact]
