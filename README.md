@@ -297,18 +297,26 @@ around:
   "NO_RESURRECTION"`). The server treats both as the no-restriction case, and
   so do this SDK's decoders — neither is surfaced as a distinct C# member,
   because that would imply a restriction the server does not apply.
-- **`Policy.HeartbeatDuration` DOES drive the heartbeat window — and this SDK
-  cannot read it.** The server uses `policy.heartbeat_duration` when it is set
-  and falls back to 600 seconds only when it is null
-  (`Policy::effective_heartbeat_duration_secs`; the culler measures against
-  `COALESCE(p.heartbeat_duration, 600)`). Earlier releases of this SDK
-  documented the window as a hardcoded 600s that ignored the policy — that was
-  wrong. But the correction cuts both ways: there is no policy getter here, so
-  `HeartbeatScheduler` cannot discover the effective window and its
-  `DefaultInterval` is ~1/3 of the 600s **fallback**. On a policy with a
-  shorter `heartbeat_duration`, that default pings too slowly and the machine
-  lapses to `DEAD` between pings — **pass your own `interval`**. The SDK cannot
-  detect this for you.
+- **`Policy.HeartbeatDuration` DOES drive the heartbeat window, and
+  `HeartbeatScheduler` does not adapt to it.** The server uses
+  `policy.heartbeat_duration` when it is set and falls back to 600 seconds only
+  when it is null (`Policy::effective_heartbeat_duration_secs`; the culler
+  measures against `COALESCE(p.heartbeat_duration, 600)`). Earlier releases of
+  this SDK documented the window as a hardcoded 600s that ignored the policy —
+  that was wrong. But the correction cuts both ways: there is no policy getter
+  here, so `DefaultInterval` is always ~1/3 of the 600s **fallback**. On a
+  policy with a shorter `heartbeat_duration`, that default pings too slowly and
+  the machine lapses to `DEAD` between pings — **pass your own `interval`**.
+  The SDK will not do it for you.
+- **You can obtain the real window without a policy getter.** A checked-out
+  `.machine` file carries a read-backed `NextHeartbeatAt`, so
+  `NextHeartbeatAt - LastHeartbeatAt` recovers the effective window — size your
+  interval from that. Two caveats: `next_heartbeat_at` is
+  `last_heartbeat_at + window`, so it is `null` and the window unrecoverable
+  until the machine has pinged at least once, and the value is a snapshot from
+  the moment the file was issued, so a later policy change is not reflected in a
+  file you already hold. Learning the duration out of band is the fallback for
+  when no machine file is available, not the only option.
 - **Whether `Machine.NextHeartbeatAt` reflects the real window depends on the
   route.** The value is derived from a window carried on the row, populated
   only when the loading query joined `policies`. `CreateMachineAsync`,
@@ -319,27 +327,30 @@ around:
   it carries the policy-derived value — reading
   `NextHeartbeatAt - LastHeartbeatAt` off a checked-out machine is the one way
   this SDK can observe the effective window.
-- **`HeartbeatStatus.Dead` is not observable from any call this SDK makes, and
-  the scheduler must never be stopped by a status.** `ping-heartbeat` writes
-  `last_heartbeat_at = NOW()` and the server derives `heartbeat_status` from
-  that same timestamp, so a ping answers `ALIVE` or `RESURRECTED` — never
-  `DEAD`. `CreateMachineAsync` and `ResetHeartbeatAsync` both yield
-  `NOT_STARTED`, and validation never emits `HEARTBEAT_DEAD`. A
+- **No heartbeat-route response can report `HeartbeatStatus.Dead`, and no
+  status ever stops the scheduler.** The durable rule, which survives new
+  endpoints in a way a route list does not: a response the server builds off a
+  **write** it just performed can never say `DEAD`, because the status is
+  derived from the timestamp that write set. `ping-heartbeat` sets
+  `last_heartbeat_at = NOW()` and so answers `ALIVE` or `RESURRECTED`;
+  `CreateMachineAsync` leaves the column unset and `ResetHeartbeatAsync` nulls
+  it, both giving `NOT_STARTED`; validation never emits `HEARTBEAT_DEAD`. So an
   `if (status == Dead)` branch written against `HeartbeatScheduler` is
-  unreachable code, and re-activation placed inside one never runs. The rule is
-  about every status, not just `DEAD`: the loop ends on cancellation, on
+  unreachable code, and re-activation placed inside one never runs. The rule
+  covers every status, not just `DEAD`: the loop ends on cancellation, on
   disposal, or on **`404 NOT_FOUND` from the ping** — surfaced on `Faulted` as
   `TamgaNotFoundException`. Hang re-activation off that and nothing else. The
-  `Dead` event is kept (a machine-read method would make it live) but cannot
-  currently fire.
-- **Where `DEAD` *is* visible, it does not mean the machine was culled.** The
-  one route that can surface it today is the machine inside a `.machine` file
-  from `CheckOutMachineAsync`, which is resolved through a read query. Even
-  there it means only that the last ping is older than the window: the cull job
-  early-returns unless `policy.require_heartbeat` is set, and that column
-  defaults to `false`, so on a default policy **nothing is ever culled** and a
-  machine can sit at `DEAD` indefinitely with its row and its seat still there.
-  A later ping revives it.
+  `Dead` event is kept (a machine-read method would make it live) but no
+  heartbeat route can currently raise it.
+- **A response built off a *read* can report `DEAD` — and one already reaches
+  you.** `CheckOutMachineAsync` yields a `.machine` file whose embedded machine
+  is resolved server-side through a read query;
+  `MachineFile.VerifyAndDecrypt` returns a `Machine` whose `HeartbeatStatus` is
+  bound from that payload. Even there it means only that the last ping is older
+  than the window: the cull job early-returns unless `policy.require_heartbeat`
+  is set, and that column defaults to `false`, so on a default policy **nothing
+  is ever culled** and a machine can sit at `DEAD` indefinitely with its row and
+  its seat still there. A later ping revives it.
 - **No response carries a `relationships` object.** Every serializer emits
   `{ type, id, attributes }` only, on licenses and machines alike, so
   `License.ProductId`/`PolicyId`/`UserId`/`EnvironmentId` and `Machine.LicenseId`

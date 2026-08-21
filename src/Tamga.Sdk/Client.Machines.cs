@@ -181,13 +181,20 @@ public sealed partial class TamgaClient
 /// <c>interval</c>.</b> The window is policy-driven —
 /// <c>Policy::effective_heartbeat_duration_secs</c> returns <c>policy.heartbeat_duration</c> when
 /// set and falls back to 600 only when it is null, and the culling job measures against
-/// <c>COALESCE(p.heartbeat_duration, 600)</c>. This SDK exposes no policy or machine getter, so
-/// the scheduler cannot discover the effective window and computes
-/// <see cref="DefaultInterval"/> from the 600s fallback. Against a policy with, say, a 120s
-/// duration, that default pings roughly every 200s — well outside the window — and the machine
-/// lapses to <c>DEAD</c> server-side between pings. You will not see that happen: the ping
-/// responses keep saying <c>ALIVE</c> (see the next paragraph), so the failure is silent. Nothing
-/// in this type can detect it for you.
+/// <c>COALESCE(p.heartbeat_duration, 600)</c>. This scheduler does not adapt — there is no policy
+/// getter, so <see cref="DefaultInterval"/> is always computed from the 600s fallback. Against a
+/// policy with, say, a 120s duration, that default pings roughly every 200s — well outside the
+/// window — and the machine lapses to <c>DEAD</c> server-side between pings. You will not see that
+/// happen: the ping responses keep saying <c>ALIVE</c> (see below), so the failure is silent.
+/// Nothing in this type can detect it for you.
+/// </para>
+/// <para>
+/// You are not left without a source for the right number, though. A checked-out <c>.machine</c>
+/// file carries a read-backed <see cref="Machine.NextHeartbeatAt"/>, so
+/// <c>NextHeartbeatAt - LastHeartbeatAt</c> recovers the effective window — see
+/// <see cref="Machine.NextHeartbeatAt"/> for the recipe and its two caveats (it needs a machine
+/// that has pinged at least once, and it is a snapshot from issue time). Learning the duration out
+/// of band is the fallback for when no machine file is available, not the only option.
 /// </para>
 /// <para>
 /// ⚠ <b>THE RULE: no <see cref="HeartbeatStatus"/> read off a response ends this loop.</b> Not
@@ -206,14 +213,23 @@ public sealed partial class TamgaClient
 /// re-activation into one means the re-activation never happens.
 /// </para>
 /// <para>
-/// <c>DEAD</c> is a real server state — it is simply not observable from any call this SDK makes
-/// today. <see cref="TamgaClient.CreateMachineAsync"/> and
-/// <see cref="TamgaClient.ResetHeartbeatAsync"/> both yield <c>NOT_STARTED</c>
-/// (<c>last_heartbeat_at</c> unset and nulled respectively), and license validation never emits
-/// <c>HEARTBEAT_DEAD</c>. The one place it can surface is the machine embedded in a checked-out
-/// <c>.machine</c> file (<see cref="Checkout.MachineFile.VerifyAndDecrypt"/>), which is resolved
-/// through a read query. It would also become observable if a machine-read method were ever added
-/// — which is why <see cref="Dead"/> stays on this type.
+/// The durable form of that, which survives new endpoints in a way a route list does not: <b>a
+/// response the server builds off a WRITE it just performed can never report <c>DEAD</c></b>,
+/// because the status is derived from the very timestamp that write set. All three heartbeat-
+/// bearing writes obey it — <see cref="TamgaClient.PingHeartbeatAsync"/> sets the timestamp to
+/// <c>NOW()</c> (<c>ALIVE</c>, or <c>RESURRECTED</c> when a death event predates it), while
+/// <see cref="TamgaClient.CreateMachineAsync"/> leaves it unset and
+/// <see cref="TamgaClient.ResetHeartbeatAsync"/> nulls it (both <c>NOT_STARTED</c>). License
+/// validation likewise never emits <c>HEARTBEAT_DEAD</c>.
+/// </para>
+/// <para>
+/// <b>A response built off a READ can report <c>DEAD</c>, and one such route already reaches
+/// you:</b> the machine embedded in a checked-out <c>.machine</c> file.
+/// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> returns a <see cref="Machine"/> whose
+/// <see cref="Machine.HeartbeatStatus"/> is bound straight from the file's payload, and that file
+/// is resolved server-side through a read query. So <c>DEAD</c> is a real state a caller of this
+/// SDK can genuinely receive — just never from this loop. A machine-read method added later would
+/// fall in the same category, which is why <see cref="Dead"/> stays on this type.
 /// </para>
 /// <para>
 /// Worth knowing for when you do see it there: <c>DEAD</c> does not mean the row was culled. The
@@ -247,8 +263,11 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// Safe only where the effective window really is the 600s fallback — i.e. a policy that
     /// leaves <c>heartbeat_duration</c> null, or sets it to 600 or more. Under a shorter duration
     /// this interval is too slow and the machine will lapse to <c>DEAD</c> between pings; pass an
-    /// explicit <c>interval</c> to the constructor instead. This SDK cannot pick that value for
-    /// you — it has no policy getter.
+    /// explicit <c>interval</c> to the constructor instead. Nothing picks that value for you — the
+    /// scheduler does not adapt — but you can obtain it: a checked-out <c>.machine</c> file gives
+    /// the real window as <c>NextHeartbeatAt - LastHeartbeatAt</c> (see
+    /// <see cref="Machine.NextHeartbeatAt"/>). Fall back to learning the duration out of band only
+    /// when no machine file is available.
     /// </remarks>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(ServerHeartbeatWindowSeconds / 3.0);
 

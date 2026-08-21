@@ -61,11 +61,15 @@ try
     Console.WriteLine($"Machine {machine.Id} activated (fingerprint {machine.Fingerprint}).");
 
     // HeartbeatScheduler pings on ~1/3 of the server's DEFAULT 600s window. That 600s is only the
-    // fallback: the real window is policy.heartbeat_duration whenever the policy sets it. This SDK
-    // has no policy getter, so the scheduler cannot discover the effective window — on a policy
-    // with a shorter duration this default is too slow and the machine lapses to DEAD between
-    // pings. If you know your policy sets one, pass it explicitly:
+    // fallback: the real window is policy.heartbeat_duration whenever the policy sets it, and this
+    // scheduler does not adapt — there is no policy getter, so on a policy with a shorter duration
+    // the default is too slow and the machine lapses to DEAD between pings. Pass the interval
+    // explicitly when you know the window:
     //     new HeartbeatScheduler(client, machine.Id, TimeSpan.FromSeconds(yourWindowSeconds / 3.0))
+    //
+    // And you can find that number rather than being told it: a checked-out .machine file carries
+    // a read-backed NextHeartbeatAt, so on a machine that has pinged at least once,
+    // NextHeartbeatAt - LastHeartbeatAt is the effective window as of the file's issue time.
     //
     // This sample runs it for a short window and then stops — a real long-running app would keep
     // it alive for the whole process lifetime.

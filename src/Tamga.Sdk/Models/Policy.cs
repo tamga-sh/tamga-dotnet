@@ -437,11 +437,13 @@ public sealed record Policy
     /// job measures against <c>COALESCE(p.heartbeat_duration, 600)</c>, and
     /// <c>heartbeat_status</c>/<c>next_heartbeat_at</c> are derived from the same window.
     ///
-    /// Using this to size a client-side ping interval is therefore correct in principle — but this
-    /// SDK gives you no way to fetch a <see cref="Policy"/> in the first place (there is no policy
-    /// getter), which is why <see cref="HeartbeatScheduler.DefaultInterval"/> is computed from the
-    /// 600s fallback and why a caller on a shorter-window policy has to supply the interval
-    /// themselves.
+    /// Using this to size a client-side ping interval is therefore correct in principle, and this
+    /// SDK gives you no way to fetch a <see cref="Policy"/> to read it from — which is why
+    /// <see cref="HeartbeatScheduler.DefaultInterval"/> is computed from the 600s fallback and why
+    /// a caller on a shorter-window policy has to supply the interval themselves. That does not
+    /// leave them guessing: the same window is recoverable as
+    /// <c>NextHeartbeatAt - LastHeartbeatAt</c> from a checked-out <c>.machine</c> file, without
+    /// this field or a policy getter (see <see cref="Machine.NextHeartbeatAt"/>).
     /// </remarks>
     [JsonPropertyName("heartbeat_duration")]
     public int? HeartbeatDuration { get; init; }

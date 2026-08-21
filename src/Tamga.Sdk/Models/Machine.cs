@@ -195,12 +195,18 @@ public sealed record Machine
     /// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> — the machine embedded in a
     /// <c>.machine</c> file from <see cref="TamgaClient.CheckOutMachineAsync"/> — is resolved
     /// through a query that DOES join <c>policies</c>, so there this carries the real
-    /// policy-derived value. Reading <c>NextHeartbeatAt - LastHeartbeatAt</c> off a checked-out
-    /// machine is the one way this SDK can observe the effective window.
+    /// policy-derived value. <c>NextHeartbeatAt - LastHeartbeatAt</c> on such a machine therefore
+    /// RECOVERS the effective window — which is how a caller sizes
+    /// <see cref="HeartbeatScheduler"/>'s interval without having to be told the policy out of
+    /// band. Two caveats: the server computes <c>next_heartbeat_at</c> as
+    /// <c>last_heartbeat_at + window</c>, so it is <see langword="null"/>, and the window
+    /// unrecoverable, until the machine has pinged at least once; and the value is a snapshot from
+    /// the moment the file was issued, so a policy changed afterwards is not reflected in a file
+    /// you already hold.
     /// </description></item>
     /// </list>
     /// So "this SDK cannot see the heartbeat window" would be false as a blanket claim — it can,
-    /// on exactly one route. What it cannot do is see it from a ping.
+    /// on exactly one route. What it cannot do is see it from a ping, or notice it changing.
     /// </remarks>
     public DateTimeOffset? NextHeartbeatAt { get; init; }
 
