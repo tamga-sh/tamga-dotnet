@@ -37,8 +37,15 @@ public class HeartbeatSchedulerTests
         Assert.NotEqual(HeartbeatScheduler.DefaultInterval, ProcessHeartbeatScheduler.DefaultInterval);
     }
 
+    /// <summary>
+    /// Covers the event-wiring itself: a <c>DEAD</c> status on a response reaches the
+    /// <see cref="HeartbeatScheduler.Dead"/> handler, and pinging continues. The <c>DEAD</c>
+    /// response is synthetic — <c>ping-heartbeat</c> cannot produce one, since it writes
+    /// <c>last_heartbeat_at = NOW()</c> and reports the status derived from it. The wiring is
+    /// still worth pinning: it is what makes the event correct if a machine-read method is added.
+    /// </summary>
     [Fact]
-    public async Task HeartbeatScheduler_PingsRepeatedly_AndRaisesDead_WhenStatusObservedDead()
+    public async Task HeartbeatScheduler_PingsRepeatedly_AndRaisesDead_OnASyntheticDeadResponse()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
@@ -75,13 +82,15 @@ public class HeartbeatSchedulerTests
     }
 
     /// <summary>
-    /// Regression: <c>DEAD</c> must not stop the ping loop. <c>heartbeat_status</c> is computed
-    /// from <c>last_heartbeat_at</c> vs the window alone — the server never consults
-    /// <c>policy.require_heartbeat</c> for it — while the cull job that deletes rows early-returns
-    /// unless <c>require_heartbeat</c> is set, and that column defaults to <c>FALSE</c>. So on a
-    /// default policy a machine reports <c>DEAD</c> indefinitely with its row and seat intact, and
-    /// a ping revives it. Breaking, returning, or short-circuiting the loop on <c>DEAD</c> would
-    /// strand a machine that was one ping away from coming back.
+    /// Regression: no status read off a response ends the ping loop. The mocked <c>DEAD</c>
+    /// responses below are DELIBERATELY SYNTHETIC — the live server cannot produce them on this
+    /// route, because <c>ping-heartbeat</c> writes <c>last_heartbeat_at = NOW()</c> and then
+    /// derives the status from that same timestamp, so a real ping answers <c>ALIVE</c> or
+    /// <c>RESURRECTED</c>. That is exactly why the test is worth keeping: it pins the defensive
+    /// property that the loop survives ANY status it is handed, including one the current server
+    /// never sends and one a future machine-read method might. Breaking, returning, or
+    /// short-circuiting on a status would strand a machine that was one ping away from coming
+    /// back. The genuine terminal signal is a 404 — covered by the test below this one.
     /// </summary>
     [Fact]
     public async Task HeartbeatScheduler_KeepsPinging_AcrossThreeConsecutiveDeadResponses_AndRevives()
@@ -98,9 +107,9 @@ public class HeartbeatSchedulerTests
             },
         }.ToJsonString();
 
-        // Three consecutive DEADs, then the revival the loop only ever reaches by continuing to
-        // ping. Trailing ALIVEs are padding so a tick landing between the signal and DisposeAsync
-        // cannot exhaust the mock's queue and turn into unrelated Faulted noise.
+        // Three consecutive synthetic DEADs, then a status the loop only ever reaches by
+        // continuing to ping. Trailing ALIVEs are padding so a tick landing between the signal and
+        // DisposeAsync cannot exhaust the mock's queue and turn into unrelated Faulted noise.
         handler.Enqueue(HttpStatusCode.OK, ResourceJson("DEAD"));
         handler.Enqueue(HttpStatusCode.OK, ResourceJson("DEAD"));
         handler.Enqueue(HttpStatusCode.OK, ResourceJson("DEAD"));

@@ -68,9 +68,9 @@ if (!validation.Valid)
 
 await using var heartbeat = new HeartbeatScheduler(client, machine.Id);
 heartbeat.Pinged += m => Console.WriteLine($"heartbeat ok: {m.HeartbeatStatus}");
-// DEAD only means "last ping older than the window" — the row and its seat are
-// still there, and the scheduler keeps pinging (which is what revives it).
-heartbeat.Dead += _ => Console.WriteLine("heartbeat window lapsed — still pinging");
+// No `heartbeat.Dead` handler on purpose: a ping response can never say DEAD
+// (it writes last_heartbeat_at = NOW(), then reports on that), so such a
+// handler is dead code. No heartbeat status stops the loop — only a 404 does.
 heartbeat.Faulted += ex =>
 {
     // A 404 from the ping is the one signal that the machine really is gone.
@@ -319,19 +319,27 @@ around:
   it carries the policy-derived value — reading
   `NextHeartbeatAt - LastHeartbeatAt` off a checked-out machine is the one way
   this SDK can observe the effective window.
-- **`HeartbeatStatus.Dead` does not mean the machine was culled.** It means one
-  thing only: the last ping is older than the heartbeat window. The server
-  derives `heartbeat_status` from `last_heartbeat_at` alone and never consults
-  `policy.require_heartbeat`, while the cull job that deletes rows early-returns
-  unless `require_heartbeat` is set — and that column defaults to `false`. So on
-  a default policy **nothing is ever culled**, and a machine reports `DEAD`
-  indefinitely with its row and its seat still there. Keep pinging through
-  `DEAD`: the ping succeeds against a dead machine and revives it (server-side
-  it is a bare `SET last_heartbeat_at = NOW()` with no resurrection check).
-  Stopping the loop and re-activating instead burns a second seat. The only
-  authoritative "row is gone" signal is a **`404 NOT_FOUND` from the ping
-  itself** — `HeartbeatScheduler` surfaces it on `Faulted` as
-  `TamgaNotFoundException`; hang re-activation off that, not off `Dead`.
+- **`HeartbeatStatus.Dead` is not observable from any call this SDK makes, and
+  the scheduler must never be stopped by a status.** `ping-heartbeat` writes
+  `last_heartbeat_at = NOW()` and the server derives `heartbeat_status` from
+  that same timestamp, so a ping answers `ALIVE` or `RESURRECTED` — never
+  `DEAD`. `CreateMachineAsync` and `ResetHeartbeatAsync` both yield
+  `NOT_STARTED`, and validation never emits `HEARTBEAT_DEAD`. A
+  `if (status == Dead)` branch written against `HeartbeatScheduler` is
+  unreachable code, and re-activation placed inside one never runs. The rule is
+  about every status, not just `DEAD`: the loop ends on cancellation, on
+  disposal, or on **`404 NOT_FOUND` from the ping** — surfaced on `Faulted` as
+  `TamgaNotFoundException`. Hang re-activation off that and nothing else. The
+  `Dead` event is kept (a machine-read method would make it live) but cannot
+  currently fire.
+- **Where `DEAD` *is* visible, it does not mean the machine was culled.** The
+  one route that can surface it today is the machine inside a `.machine` file
+  from `CheckOutMachineAsync`, which is resolved through a read query. Even
+  there it means only that the last ping is older than the window: the cull job
+  early-returns unless `policy.require_heartbeat` is set, and that column
+  defaults to `false`, so on a default policy **nothing is ever culled** and a
+  machine can sit at `DEAD` indefinitely with its row and its seat still there.
+  A later ping revives it.
 - **No response carries a `relationships` object.** Every serializer emits
   `{ type, id, attributes }` only, on licenses and machines alike, so
   `License.ProductId`/`PolicyId`/`UserId`/`EnvironmentId` and `Machine.LicenseId`

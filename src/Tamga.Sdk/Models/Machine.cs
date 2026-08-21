@@ -25,16 +25,26 @@ public enum HeartbeatStatus
     Alive,
 
     /// <summary>
-    /// Wire value <c>DEAD</c> — the window elapsed with no ping. That is ALL it means.
+    /// Wire value <c>DEAD</c> — the window elapsed with no ping. That is ALL it means, and no call
+    /// this SDK currently makes can return it.
     /// </summary>
     /// <remarks>
-    /// ⚠ It does NOT mean the machine row was culled, deleted, or that its seat was released. The
-    /// server computes this field from <c>last_heartbeat_at</c> alone and never looks at
-    /// <c>policy.require_heartbeat</c>; the cull job that deletes rows is gated on
-    /// <c>require_heartbeat</c>, which defaults to <c>FALSE</c>, so under a default policy nothing
-    /// is ever culled and a machine can report <c>DEAD</c> forever with its row intact. Keep
-    /// pinging — the ping succeeds and revives it. Only a <c>404</c> from the ping proves the row
-    /// is gone. See <see cref="HeartbeatScheduler"/>.
+    /// ⚠ <b>Unreachable from every write route.</b> <c>ping-heartbeat</c> writes
+    /// <c>last_heartbeat_at = NOW()</c> and derives the status from that same timestamp
+    /// (<c>ALIVE</c>/<c>RESURRECTED</c>); <c>create</c> never sets the column and
+    /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>); and license validation never emits
+    /// <c>HEARTBEAT_DEAD</c>. The single place this value reaches a caller today is the machine
+    /// inside a checked-out <c>.machine</c> file
+    /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt"/>), which is resolved through a read
+    /// query. Treat <c>if (status == Dead)</c> written against a ping result as dead code.
+    ///
+    /// ⚠ <b>And where it IS observable, it does not mean the row was culled</b>, deleted, or that
+    /// its seat was released. The server computes this field from <c>last_heartbeat_at</c> alone
+    /// and never looks at <c>policy.require_heartbeat</c>; the cull job that deletes rows is gated
+    /// on <c>require_heartbeat</c>, which defaults to <c>FALSE</c>, so under a default policy
+    /// nothing is ever culled and a machine can sit at <c>DEAD</c> indefinitely with its row
+    /// intact. A ping revives it. Only a <c>404</c> from the ping proves the row is gone. See
+    /// <see cref="HeartbeatScheduler"/>.
     /// </remarks>
     Dead,
 

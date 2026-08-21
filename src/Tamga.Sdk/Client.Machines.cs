@@ -124,12 +124,19 @@ public sealed partial class TamgaClient
 
     /// <summary><c>POST /machines/{id}/actions/ping-heartbeat</c> — no body, sets <c>last_heartbeat_at = now</c>. Returns the updated machine resource.</summary>
     /// <remarks>
-    /// Works fine on a machine currently reporting <see cref="HeartbeatStatus.Dead"/>, and revives
-    /// it: server-side this is a bare <c>UPDATE … SET last_heartbeat_at = NOW()</c> with no
-    /// resurrection gate in front of it. So do not stop pinging a <c>DEAD</c> machine — see
-    /// <see cref="HeartbeatScheduler"/>'s remarks. A <see cref="TamgaNotFoundException"/>
-    /// (<c>404</c>) is the one response that does mean the row is gone and re-activation is
-    /// required.
+    /// Revives a machine that has gone <c>DEAD</c> server-side: this is a bare
+    /// <c>UPDATE … SET last_heartbeat_at = NOW()</c> with no resurrection gate in front of it, so
+    /// it succeeds however long the machine has been silent.
+    ///
+    /// The returned resource will not tell you that is what happened. Status is derived from the
+    /// timestamp this call just wrote, so its age is ~0 and the answer is always
+    /// <see cref="HeartbeatStatus.Alive"/>, or <see cref="HeartbeatStatus.Resurrected"/> when a
+    /// death event had already been recorded — never <see cref="HeartbeatStatus.Dead"/>. Branching
+    /// on <c>Dead</c> here is unreachable code. <c>NextHeartbeatAt</c> on this response is also
+    /// fallback-derived rather than policy-derived; see <see cref="Machine.NextHeartbeatAt"/>.
+    ///
+    /// A <see cref="TamgaNotFoundException"/> (<c>404</c>) is the one response that means the row
+    /// is gone and re-activation is required.
     /// </remarks>
     /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — the machine row no longer exists; re-activate.</exception>
     public async Task<Machine> PingHeartbeatAsync(Guid machineId, CancellationToken cancellationToken = default)
@@ -165,8 +172,8 @@ public sealed partial class TamgaClient
 /// Periodic heartbeat pinger for a single machine, built on <see cref="PeriodicTimer"/>. Pings on
 /// an interval set to ~1/3 of the server's <em>default</em> 600s heartbeat window
 /// (<see cref="DefaultInterval"/>) — see <see cref="ServerHeartbeatWindowSeconds"/> for why that
-/// is a default and not the window in force. Raises <see cref="Dead"/> when a ping observes
-/// <see cref="HeartbeatStatus.Dead"/> — as a notification only; the loop keeps pinging.
+/// is a default and not the window in force. The loop runs until cancelled or disposed; no
+/// heartbeat status it reads can stop it.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -178,29 +185,46 @@ public sealed partial class TamgaClient
 /// the scheduler cannot discover the effective window and computes
 /// <see cref="DefaultInterval"/> from the 600s fallback. Against a policy with, say, a 120s
 /// duration, that default pings roughly every 200s — well outside the window — and the machine
-/// goes <c>DEAD</c> between pings. Nothing in this type can detect that for you.
+/// lapses to <c>DEAD</c> server-side between pings. You will not see that happen: the ping
+/// responses keep saying <c>ALIVE</c> (see the next paragraph), so the failure is silent. Nothing
+/// in this type can detect it for you.
 /// </para>
 /// <para>
-/// ⚠ <b><see cref="HeartbeatStatus.Dead"/> does NOT mean the machine row was culled.</b> It means
-/// exactly one thing: the last ping is older than the heartbeat window. The server derives
-/// <c>heartbeat_status</c> purely from <c>last_heartbeat_at</c> versus that window and never
-/// consults <c>policy.require_heartbeat</c>, while the cull job that actually deletes rows
-/// early-returns unless <c>require_heartbeat</c> is set — and that column defaults to
-/// <c>FALSE</c>. On a default policy nothing is ever culled, so a machine reports <c>DEAD</c>
-/// indefinitely with its row and its seat both still there.
+/// ⚠ <b>THE RULE: no <see cref="HeartbeatStatus"/> read off a response ends this loop.</b> Not
+/// <c>DEAD</c>, not anything else. The loop ends for exactly three reasons — the
+/// <see cref="CancellationToken"/> fires, <see cref="DisposeAsync"/> runs, or you stop it
+/// yourself. Everything else is a tick that pings again.
 /// </para>
 /// <para>
-/// That is why this loop deliberately KEEPS PINGING through <c>DEAD</c>. The ping succeeds against
-/// a dead machine and revives it — server-side it is a bare
-/// <c>UPDATE … SET last_heartbeat_at = NOW()</c> with no resurrection check in the way. Stopping
-/// the loop on <see cref="Dead"/>, or tearing the machine down and re-activating it, would burn a
-/// second seat for a machine that was one successful ping away from <c>ALIVE</c>/
-/// <c>RESURRECTED</c>.
+/// The reason to state that as a rule about <em>all</em> statuses rather than a warning about
+/// <c>DEAD</c> specifically: a response from <see cref="TamgaClient.PingHeartbeatAsync"/> can
+/// never say <c>DEAD</c> in the first place. The ping writes
+/// <c>last_heartbeat_at = NOW()</c> and the server then derives <c>heartbeat_status</c> from that
+/// same freshly-written timestamp, so its age is ~0 and always inside the window — the response is
+/// <c>ALIVE</c>, or <c>RESURRECTED</c> when a death event had already been recorded. A
+/// <c>if (status == Dead)</c> branch written against this loop is unreachable code, and writing
+/// re-activation into one means the re-activation never happens.
 /// </para>
 /// <para>
-/// The only authoritative "this row is gone" signal is a <c>404 NOT_FOUND</c> from the ping
-/// itself, which arrives on <see cref="Faulted"/> as a <see cref="TamgaNotFoundException"/>. Hang
-/// re-activation off that, never off <see cref="Dead"/>.
+/// <c>DEAD</c> is a real server state — it is simply not observable from any call this SDK makes
+/// today. <see cref="TamgaClient.CreateMachineAsync"/> and
+/// <see cref="TamgaClient.ResetHeartbeatAsync"/> both yield <c>NOT_STARTED</c>
+/// (<c>last_heartbeat_at</c> unset and nulled respectively), and license validation never emits
+/// <c>HEARTBEAT_DEAD</c>. The one place it can surface is the machine embedded in a checked-out
+/// <c>.machine</c> file (<see cref="Checkout.MachineFile.VerifyAndDecrypt"/>), which is resolved
+/// through a read query. It would also become observable if a machine-read method were ever added
+/// — which is why <see cref="Dead"/> stays on this type.
+/// </para>
+/// <para>
+/// Worth knowing for when you do see it there: <c>DEAD</c> does not mean the row was culled. The
+/// cull job early-returns unless <c>policy.require_heartbeat</c> is set, and that column defaults
+/// to <c>FALSE</c>, so under a default policy a machine reports <c>DEAD</c> indefinitely with its
+/// row and its seat both still present, and a later ping simply revives it.
+/// </para>
+/// <para>
+/// The only terminal signal from a ping is a <c>404 NOT_FOUND</c>, which means the row is gone.
+/// It arrives on <see cref="Faulted"/> as a <see cref="TamgaNotFoundException"/>. Hang
+/// re-activation off that, and off nothing else.
 /// </para>
 /// </remarks>
 public sealed class HeartbeatScheduler : IAsyncDisposable
@@ -247,11 +271,26 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     public event Action<Exception>? Faulted;
 
     /// <summary>
-    /// Raised when a ping observes <see cref="HeartbeatStatus.Dead"/>. Informational only — see the
-    /// type-level remarks: <c>DEAD</c> means "last ping is older than the window", not "culled", and
-    /// the loop keeps pinging (which is what revives the machine). A throwing handler is caught and
-    /// rerouted to <see cref="Faulted"/> rather than killing the ping loop.
+    /// ⚠ <b>No call this SDK currently makes can raise this.</b> Do not wire re-activation — or any
+    /// other recovery — to it. Raised when a ping observes <see cref="HeartbeatStatus.Dead"/>,
+    /// which a ping response cannot report: the ping writes <c>last_heartbeat_at = NOW()</c> and
+    /// the status is derived from that same timestamp, so the answer is always <c>ALIVE</c> or
+    /// <c>RESURRECTED</c>. See the type-level remarks.
     /// </summary>
+    /// <remarks>
+    /// Deliberately kept, and deliberately NOT <c>[Obsolete]</c>. The event is not deprecated and
+    /// nothing supersedes it — it is correct API that goes live the moment a machine-read method
+    /// lands, since a read <em>can</em> return <c>DEAD</c>. Marking it obsolete would file it
+    /// alongside this SDK's genuinely dead members (the ones annotated "always null" and
+    /// "scheduled for removal"), inviting a future maintainer to delete a member we want to keep,
+    /// and — because this repo builds with <c>TreatWarningsAsErrors</c> — would break the build of
+    /// any consumer who subscribes defensively. A doc warning costs nobody a build and says the
+    /// same thing.
+    ///
+    /// If it does fire, treat it as information only: the loop continues, and that is correct
+    /// behaviour, not a gap. A throwing handler is caught and rerouted to <see cref="Faulted"/>
+    /// rather than killing the ping loop.
+    /// </remarks>
     public event Action<Machine>? Dead;
 
     /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
@@ -291,13 +330,16 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
                 // A throwing Pinged/Dead handler must not kill the loop — reroute to Faulted
                 // instead, same as a failed ping itself.
                 InvokeSafely(Pinged, machine);
+                // Defensive only: a ping response cannot currently be DEAD. The ping writes
+                // last_heartbeat_at = NOW() and the server derives the status from that same
+                // timestamp, so it answers ALIVE or RESURRECTED. This branch exists because DEAD
+                // is a real wire value that a machine-read route can return, and because the loop
+                // must survive ANY status it is handed. Note what it does not do: it does not
+                // break, return, or skip a tick. No status ends this loop — only cancellation,
+                // disposal, or the caller. A genuinely deleted machine surfaces as a 404 on the
+                // ping, via Faulted.
                 if (machine.HeartbeatStatus == HeartbeatStatus.Dead)
                 {
-                    // Notify, then LOOP ON. DEAD only means the previous ping was older than the
-                    // window — the row and its seat are still there (on a default policy,
-                    // require_heartbeat = FALSE, nothing is ever culled), and the next ping revives
-                    // it. Breaking out here would strand a machine one ping short of ALIVE. A
-                    // genuinely deleted machine surfaces as 404 on the ping instead, via Faulted.
                     InvokeSafely(Dead, machine);
                 }
             }
