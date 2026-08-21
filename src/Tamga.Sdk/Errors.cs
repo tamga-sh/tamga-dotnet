@@ -271,6 +271,159 @@ public sealed class SignatureVerificationException : Exception
     public SignatureVerificationException(string message) : base(message) { }
 }
 
+/// <summary>
+/// Base class for every failure to <em>select</em> a signing key for an offline file — as opposed
+/// to <see cref="SignatureVerificationException"/>, which means a key was selected and the
+/// signature still did not check out.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>Keeping these apart is the entire point of the key-set entry points.</b> They are different
+/// incidents with opposite responses:
+/// </para>
+/// <list type="bullet">
+/// <item><description>
+/// A <see cref="SigningKeySelectionException"/> means <b>the file is not necessarily bad</b> — the
+/// key that signed it simply is not in the set. Refresh the key set or ship an application update,
+/// then try again. Locking the customer out here is the bug this exists to prevent.
+/// </description></item>
+/// <item><description>
+/// A <see cref="SignatureVerificationException"/> from a key-set entry point means the file's
+/// <c>kid</c> named a key the caller <em>does</em> trust and the signature still failed. That file
+/// is forged or corrupted. Refuse it.
+/// </description></item>
+/// </list>
+/// <para>
+/// Catch this base type to handle "I cannot verify this with the keys I have" uniformly, or the
+/// sealed subclasses to tell a stale key set from a server that never published one.
+/// </para>
+/// </remarks>
+public abstract class SigningKeySelectionException : Exception
+{
+    /// <summary>Constructs with the given message, the file's <c>kid</c>, and the ids that were available.</summary>
+    private protected SigningKeySelectionException(string message, string keyId, IReadOnlyList<string> availableKeyIds)
+        : base(message)
+    {
+        KeyId = keyId;
+        AvailableKeyIds = availableKeyIds;
+    }
+
+    /// <summary>
+    /// The <c>kid</c> the file claims, verbatim.
+    /// </summary>
+    /// <remarks>
+    /// Unverified input, and treated as such: it is read from bytes whose signature has not been
+    /// checked, and the only thing ever done with it is to select from keys the caller already
+    /// supplied. It can never introduce a key. Safe to log; do not derive anything else from it.
+    /// </remarks>
+    public string KeyId { get; }
+
+    /// <summary>The usable <c>kid</c>s the supplied key set did hold. Log beside <see cref="KeyId"/>.</summary>
+    public IReadOnlyList<string> AvailableKeyIds { get; }
+}
+
+/// <summary>
+/// The file names a signing key that is not in the supplied key set.
+/// </summary>
+/// <remarks>
+/// <b>This is the case that is not a forgery.</b> The file says which key signed it, and that key
+/// is simply absent — a set fetched before the last rotation, a pinned key that has since been
+/// superseded, or a key an operator deleted outright (which is how a <em>compromised</em> key is
+/// retired, and which does invalidate every legitimate file signed with it). Fetch the key set
+/// again, or ship an update carrying the new pinned key, before treating the file as suspect.
+/// </remarks>
+public sealed class UnknownSigningKeyException : SigningKeySelectionException
+{
+    /// <summary>Constructs from the file's <c>kid</c> and the ids the key set held.</summary>
+    public UnknownSigningKeyException(string keyId, IReadOnlyList<string> availableKeyIds)
+        : base(
+            $"The file is signed by key '{keyId}', which is not in the supplied key set" +
+            (availableKeyIds.Count == 0
+                ? " (the key set held no usable key). This is not a signature failure — refresh the key set before treating the file as forged."
+                : $" (had: {string.Join(", ", availableKeyIds)}). This is not a signature failure — refresh the key set before treating the file as forged."),
+            keyId,
+            availableKeyIds)
+    {
+    }
+}
+
+/// <summary>
+/// The file was signed by an account whose Ed25519 public key was never populated server-side, so
+/// its <c>kid</c> is <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/> and no key set can ever
+/// contain it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Distinguished from <see cref="UnknownSigningKeyException"/> because the remedy is completely
+/// different, and "refresh your key set" would send the caller — and support — somewhere that
+/// cannot help. Nothing on the client side can fix this one.
+/// </para>
+/// <para>
+/// Both checkout handlers compute the claim as
+/// <c>key_id(account.ed25519_public_key.as_deref().unwrap_or_default())</c>
+/// (<c>check_out_license.rs:95-97</c>, <c>check_out_machine.rs:127-129</c>). An account whose key
+/// column was never backfilled therefore signs <b>every</b> file it issues with
+/// <c>SHA-256("")</c> truncated — the constant <c>e3b0c44298fc1c14</c>. Since the empty string is
+/// not a valid public key, no published key set can hold that id, so the condition is permanent
+/// until the account's key is populated server-side.
+/// </para>
+/// </remarks>
+public sealed class UnpublishedSigningKeyException : SigningKeySelectionException
+{
+    /// <summary>Constructs from the file's <c>kid</c> and the ids the key set held.</summary>
+    public UnpublishedSigningKeyException(string keyId, IReadOnlyList<string> availableKeyIds)
+        : base(
+            $"The file's 'kid' is '{keyId}', the id of the empty string — the signing account has no Ed25519 public key " +
+            "recorded server-side, so it signs every file it issues with this one id and no key set can contain it. " +
+            "This is a server-side account configuration problem, not a stale key set and not a forged file.",
+            keyId,
+            availableKeyIds)
+    {
+    }
+}
+
+/// <summary>
+/// The file cannot be matched to a key by <c>kid</c> at all, because for its signing scheme the
+/// <c>kid</c> does not name the key that signed it.
+/// </summary>
+/// <remarks>
+/// <para>
+/// <b>This is a server property, not a client limitation.</b> Both checkout handlers compute the
+/// claim as <c>key_id(account.ed25519_public_key…)</c> unconditionally
+/// (<c>check_out_machine.rs:127-129</c>), while a machine file's <em>signing</em> key is chosen by
+/// the license's scheme (<c>check_out_machine.rs:86-99</c> selects the RSA, ECDSA or Ed25519
+/// private key). For an RSA- or ECDSA-signed machine file those are different keys, so the
+/// <c>kid</c> names an Ed25519 key that had no part in the signature — and the key-set endpoint
+/// publishes Ed25519 keys only in any case.
+/// </para>
+/// <para>
+/// License files are unaffected: they are always Ed25519-signed, so their <c>kid</c> always names
+/// their signing key.
+/// </para>
+/// <para>
+/// Verify these with the scheme-taking
+/// <see cref="Checkout.MachineFile.VerifyWithClaims(Models.LicenseScheme, ReadOnlySpan{byte}, string, string, long)"/>
+/// and the account's own public key for that algorithm. Rotation only ever rotates the Ed25519 key
+/// (<c>rotate_ed25519</c>), so there is no rotation for these schemes to survive today.
+/// </para>
+/// </remarks>
+public sealed class SigningKeyNotApplicableException : SigningKeySelectionException
+{
+    /// <summary>Constructs from the offending scheme.</summary>
+    public SigningKeyNotApplicableException(Models.LicenseScheme scheme)
+        : base(
+            $"A {scheme} machine file's 'kid' claim names the account's Ed25519 key, not the key that signed it, " +
+            "so it cannot be matched against a key set. Verify it with the scheme-taking overload and that scheme's public key instead.",
+            keyId: "",
+            availableKeyIds: Array.Empty<string>())
+    {
+        Scheme = scheme;
+    }
+
+    /// <summary>The scheme whose machine files carry a <c>kid</c> that does not name their signing key.</summary>
+    public Models.LicenseScheme Scheme { get; }
+}
+
 /// <summary><c>404 NOT_FOUND</c>.</summary>
 public sealed class TamgaNotFoundException : TamgaApiException
 {

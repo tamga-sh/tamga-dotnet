@@ -38,9 +38,13 @@ public sealed partial class TamgaClient
     /// license gets <c>403</c> here rather than the silent <c>204</c> an expired one gets.
     /// </para>
     /// <para>
-    /// Note also what this endpoint does not give you: there is a release-artifact download route
-    /// server-side, but it is gated behind a permission no role currently holds, so it would
-    /// <c>403</c> for every caller. Fetching the actual binary remains the application's job.
+    /// Note what this endpoint does not give you: the release, not its bytes. The artifacts that
+    /// carry the bytes are a separate resource — see <see cref="ListReleaseArtifactsAsync"/> and
+    /// <see cref="DownloadArtifactAsync"/>. Their metadata was always readable with a licence key
+    /// (<c>Role::LicenseToken</c> has held <c>artifact.read</c> throughout); what was unreachable
+    /// was the byte fetch, until <c>tamga-api</c> <c>e6d317b</c> granted
+    /// <c>artifact.download</c>. This SDK documented the download as permanently <c>403</c>; that
+    /// is no longer true.
     /// </para>
     /// </remarks>
     /// <exception cref="TamgaApiException">

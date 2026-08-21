@@ -304,12 +304,132 @@ public sealed class MachineFile
         }
 
         // Only now is `enc` known to be authentic, so only now may any of it be decoded.
+        var payload = ParsePayload(DecodePayloadJson(scheme, licenseKey, fingerprint));
+        return FinishPayload(payload, nowUnixSeconds);
+    }
+
+    /// <summary>
+    /// Verifies a <c>.machine</c> file against a <see cref="SigningKeySet"/>, selecting the key by
+    /// the file's own signed <c>kid</c> claim so a file that predates a key rotation still
+    /// verifies.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Ed25519 machine files only</b>, and that is a server property rather than a client
+    /// limitation. The <c>kid</c> claim is computed as
+    /// <c>key_id(account.ed25519_public_key…)</c> unconditionally
+    /// (<c>check_out_machine.rs:127-129</c>), while the file's <em>signing</em> key is chosen by
+    /// the license's scheme (<c>check_out_machine.rs:86-99</c>). For an RSA- or ECDSA-signed file
+    /// those are different keys, so the <c>kid</c> names a key that had no part in the signature —
+    /// and the key-set endpoint publishes Ed25519 keys only in any case. Those schemes raise
+    /// <see cref="SigningKeyNotApplicableException"/>; verify them with
+    /// <see cref="VerifyWithClaims"/> and that scheme's own public key. Rotation only ever rotates
+    /// the Ed25519 key, so there is no rotation for them to survive today.
+    /// </para>
+    /// <para>
+    /// Otherwise identical in contract to
+    /// <see cref="LicenseFile.VerifyWithKeySet"/>, including the ordering note: the payload is
+    /// decoded (and decrypted, under AES-GCM's own authentication) before the signature is checked,
+    /// because the <c>kid</c> lives inside it. The only value taken from unverified bytes is the
+    /// <c>kid</c>, and it can only select from keys the caller already supplied. No
+    /// <see cref="Machine"/> is ever produced from an unverified payload.
+    /// </para>
+    /// </remarks>
+    /// <param name="scheme">The license's signing scheme. Must be Ed25519 (or <see cref="LicenseScheme.None"/>, which signs with Ed25519).</param>
+    /// <param name="signingKeys">The trusted key set.</param>
+    /// <param name="licenseKey">The license key — HKDF input keying material for an encrypted file.</param>
+    /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file.</param>
+    /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
+    /// <returns>The machine, the signed claims, and the key the file was verified against.</returns>
+    /// <exception cref="SigningKeyNotApplicableException"><paramref name="scheme"/> is RSA or ECDSA — its <c>kid</c> does not name its signing key.</exception>
+    /// <exception cref="SchemeNotSupportedException"><paramref name="scheme"/> is <see cref="LicenseScheme.Rsa2048JwtRs256"/>.</exception>
+    /// <exception cref="UnknownSigningKeyException">The file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
+    /// <exception cref="UnpublishedSigningKeyException">The signing account has no Ed25519 public key recorded server-side.</exception>
+    /// <exception cref="SignatureVerificationException">The named key IS trusted and the signature still failed — the file is forged or corrupted.</exception>
+    /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
+    public (Machine Machine, LicenseFileClaims Claims, SigningKey Key) VerifyWithKeySet(
+        LicenseScheme scheme,
+        SigningKeySet signingKeys,
+        string licenseKey,
+        string fingerprint,
+        long nowUnixSeconds)
+    {
+        ArgumentNullException.ThrowIfNull(signingKeys);
+
+        // Same refusal, and for the same reason, as the scheme-taking path: this scheme has no
+        // machine-file verifier and `alg` cannot tell it apart from RSA_2048_PKCS1_SIGN.
+        RejectJwtRs256(scheme);
+
+        // Refused BEFORE anything is decoded. For these schemes the kid names the account's
+        // Ed25519 key while the signature was made with an RSA or ECDSA key, so matching by kid
+        // would either fail confusingly or — worse — select a key that cannot verify the file and
+        // report it as forged.
+        if (scheme is not (LicenseScheme.Ed25519Sign or LicenseScheme.None))
+        {
+            throw new SigningKeyNotApplicableException(scheme);
+        }
+
+        var payload = ParsePayload(DecodePayloadJson(scheme, licenseKey, fingerprint));
+        var claims = payload.Meta
+            ?? throw new OfflineFileFormatException(
+                "Machine file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
+
+        var (key, publicKeyBytes) = signingKeys.Resolve(claims.KeyId);
+
+        if (!Verify(scheme, publicKeyBytes))
+        {
+            throw new SignatureVerificationException(
+                $"Machine file signature verification failed against the key its 'kid' claim names ('{claims.KeyId}'), " +
+                "which IS in the supplied key set — the file is forged or corrupted.");
+        }
+
+        var (machine, verifiedClaims) = FinishPayload(payload, nowUnixSeconds);
+        return (machine, verifiedClaims, key);
+    }
+
+    /// <summary>
+    /// As <see cref="VerifyWithKeySet"/>, using the local clock and returning just the machine.
+    /// </summary>
+    /// <param name="scheme">The license's signing scheme. Must be Ed25519.</param>
+    /// <param name="signingKeys">The trusted key set.</param>
+    /// <param name="licenseKey">The license key — HKDF input keying material for an encrypted file.</param>
+    /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file.</param>
+    public Machine VerifyAndDecrypt(LicenseScheme scheme, SigningKeySet signingKeys, string licenseKey, string fingerprint)
+        => VerifyAndDecrypt(scheme, signingKeys, licenseKey, fingerprint, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+
+    /// <summary>
+    /// As <see cref="VerifyAndDecrypt(LicenseScheme, SigningKeySet, string, string)"/>, with the
+    /// current time supplied by the caller.
+    /// </summary>
+    /// <param name="scheme">The license's signing scheme. Must be Ed25519.</param>
+    /// <param name="signingKeys">The trusted key set.</param>
+    /// <param name="licenseKey">The license key — HKDF input keying material for an encrypted file.</param>
+    /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file.</param>
+    /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch.</param>
+    public Machine VerifyAndDecrypt(LicenseScheme scheme, SigningKeySet signingKeys, string licenseKey, string fingerprint, long nowUnixSeconds)
+        => VerifyWithKeySet(scheme, signingKeys, licenseKey, fingerprint, nowUnixSeconds).Machine;
+
+    /// <summary>
+    /// Enforces the <c>alg</c> grammar/scheme cross-check and returns the payload JSON bytes,
+    /// decrypting when <c>alg</c> says so.
+    /// </summary>
+    /// <remarks>
+    /// Extracted so the scheme-key and key-set paths share one implementation. Two copies would
+    /// drift, and a drift in <see cref="ParseIsEncrypted"/>'s grammar check is an
+    /// algorithm-confusion bug.
+    /// </remarks>
+    private byte[] DecodePayloadJson(LicenseScheme scheme, string licenseKey, string fingerprint)
+    {
         var isEncrypted = ParseIsEncrypted(Certificate.Alg, scheme);
 
-        var jsonBytes = isEncrypted
+        return isEncrypted
             ? DecryptPayload(Certificate.Enc, licenseKey, fingerprint)
             : DecodePlainPayload(Certificate.Enc);
+    }
 
+    /// <summary>Deserializes the payload JSON and rejects a payload carrying no signed claims.</summary>
+    private static MachineFilePayload ParsePayload(byte[] jsonBytes)
+    {
         MachineFilePayload? payload;
         try
         {
@@ -333,17 +453,25 @@ public sealed class MachineFile
                 "Machine file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
         }
 
+        return payload;
+    }
+
+    /// <summary>Enforces the signed <c>exp</c> claim and maps the resource. Runs only after a signature has verified.</summary>
+    private static (Machine Machine, LicenseFileClaims Claims) FinishPayload(MachineFilePayload payload, long nowUnixSeconds)
+    {
+        var meta = payload.Meta!;
+
         // The signature proves the file is authentic. It does not prove it is still valid — that
         // is this check, and skipping it is what made every checked-out machine file permanent.
         // A file checked out with no `ttl` legitimately carries no `exp` and never expires; that
         // absence is by design (check_out_machine.rs sets `exp` from `ttl.map(..)`), not an error.
         // Tolerance is shared with the license-file path on purpose — see the constant's remarks.
-        if (payload.Meta.ExpiresAt is { } exp && nowUnixSeconds - LicenseFile.ClockSkewToleranceSeconds > exp)
+        if (meta.ExpiresAt is { } exp && nowUnixSeconds - LicenseFile.ClockSkewToleranceSeconds > exp)
         {
             throw new LicenseFileExpiredException(exp);
         }
 
-        return (Machine.FromResource(payload.Data), payload.Meta);
+        return (Machine.FromResource(payload.Data), meta);
     }
 
     private static void RejectJwtRs256(LicenseScheme scheme)

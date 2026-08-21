@@ -51,6 +51,20 @@
     <None Include="../../README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
+  <!--
+    The artifact-download HttpClient is created lazily and owned conditionally,
+    and the only honest way to test that contract is to look at it directly:
+    every alternative needed a real socket, and "no live-network HTTP calls in
+    tests" is a rule in this repo (see CLAUDE.md "Testing"). An earlier attempt
+    to reach it by cancelling the token passed while never executing the code —
+    HttpClient observes the token in ReadAsStringAsync on the FIRST leg, so the
+    download client was never created and the test asserted a true thing for a
+    false reason. Adds no public API surface.
+  -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Tamga.Sdk.Tests" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="MinVer" Version="7.0.0">
       <PrivateAssets>all</PrivateAssets>
