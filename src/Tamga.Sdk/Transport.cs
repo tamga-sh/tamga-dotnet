@@ -426,8 +426,9 @@ public sealed class TamgaTransport
     /// <remarks>
     /// <c>/actions/ping-heartbeat</c> and <c>/actions/reset-heartbeat</c> are listed explicitly:
     /// neither ends with <c>/actions/ping</c> (that suffix is the <em>process</em> ping route), so
-    /// both were silently excluded and a throttled heartbeat was dropped — which is exactly how a
-    /// machine gets culled. Both are bare idempotent state writes server-side
+    /// both were silently excluded and a throttled heartbeat was dropped — which flips a machine to
+    /// <c>DEAD</c>, and on a policy that actually sets <c>require_heartbeat</c> (it defaults to
+    /// <c>FALSE</c>) eventually gets it culled. Both are bare idempotent state writes server-side
     /// (<c>UPDATE … SET last_heartbeat_at = NOW()</c>), so repeating them cannot burn a seat.
     /// </remarks>
     private static readonly string[] RetryablePostSuffixes =

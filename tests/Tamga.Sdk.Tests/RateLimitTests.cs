@@ -37,8 +37,10 @@ public class RateLimitTests
     /// Heartbeat writes must be retried. Neither <c>/actions/ping-heartbeat</c> nor
     /// <c>/actions/reset-heartbeat</c> ends with the <c>/actions/ping</c> suffix — that one is the
     /// PROCESS ping route — so both fell outside the retry list, and a throttled heartbeat was
-    /// dropped silently. Dropped heartbeats are how a machine gets culled. Both are bare
-    /// idempotent state writes server-side, so repeating them cannot burn a seat.
+    /// dropped silently. A dropped heartbeat flips a machine to <c>DEAD</c>, and on a policy that
+    /// actually sets <c>require_heartbeat</c> (it defaults to <c>FALSE</c>) eventually gets it
+    /// culled. Both are bare idempotent state writes server-side, so repeating them cannot burn a
+    /// seat.
     /// </summary>
     [Fact]
     public void HeartbeatWritesAreRetryable()

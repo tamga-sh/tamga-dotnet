@@ -142,7 +142,13 @@ public sealed class OverageStrategyConverter : JsonConverter<OverageStrategy>
     }
 }
 
-/// <summary>What happens to a machine row once it's been <c>DEAD</c> for longer than its resurrection grace window.</summary>
+/// <summary>What happens to a machine row once it's been <c>DEAD</c> for longer than its resurrection grace window — <em>if</em> the cull job runs at all.</summary>
+/// <remarks>
+/// ⚠ This whole enum is inert unless <see cref="Policy.RequireHeartbeat"/> is <see langword="true"/>:
+/// the server's cull job early-returns on a policy that does not require heartbeats, and that
+/// column defaults to <c>FALSE</c>. Under a default policy no machine row is ever culled no matter
+/// what this says, and <see cref="HeartbeatStatus.Dead"/> therefore never implies deletion.
+/// </remarks>
 [JsonConverter(typeof(HeartbeatCullStrategyConverter))]
 public enum HeartbeatCullStrategy
 {
@@ -174,10 +180,17 @@ public sealed class HeartbeatCullStrategyConverter : JsonConverter<HeartbeatCull
 }
 
 /// <summary>
-/// Grace window after a machine is marked <c>DEAD</c> during which a new heartbeat ping revives
-/// it (transitions to <c>RESURRECTED</c>) instead of it being culled per
-/// <see cref="HeartbeatCullStrategy"/>.
+/// Grace window after a machine is marked <c>DEAD</c> during which a new heartbeat ping is
+/// recorded as a revival (transitions to <c>RESURRECTED</c>) rather than leaving the machine
+/// exposed to <see cref="HeartbeatCullStrategy"/>.
 /// </summary>
+/// <remarks>
+/// Note the ping itself is never gated on this window — it is a bare
+/// <c>SET last_heartbeat_at = NOW()</c> and succeeds against a <c>DEAD</c> machine regardless, so
+/// outside the grace window the machine simply comes back as <c>ALIVE</c> instead of
+/// <c>RESURRECTED</c>. And the cull this window defers only runs at all when
+/// <see cref="Policy.RequireHeartbeat"/> is <see langword="true"/>, which is not the default.
+/// </remarks>
 [JsonConverter(typeof(HeartbeatResurrectionStrategyConverter))]
 public enum HeartbeatResurrectionStrategy
 {
@@ -401,7 +414,15 @@ public sealed record Policy
     [JsonConverter(typeof(CheckInIntervalConverter))]
     public CheckInInterval? CheckInInterval { get; init; }
 
-    /// <summary>Whether machines must send periodic heartbeats to stay alive.</summary>
+    /// <summary>Whether machines must send periodic heartbeats to stay alive. Server default: <see langword="false"/>.</summary>
+    /// <remarks>
+    /// This is the master switch for dead-machine culling, and it is OFF by default. The server's
+    /// cull job early-returns unless this is <see langword="true"/>, so on a default policy
+    /// <see cref="HeartbeatCullStrategy"/> never fires and no machine row is ever removed for a
+    /// missed heartbeat. Note that <c>heartbeat_status</c> is computed independently of this flag —
+    /// a machine on a default policy still reports <see cref="HeartbeatStatus.Dead"/> once its
+    /// window lapses, indefinitely, while its row and seat stay put.
+    /// </remarks>
     [JsonPropertyName("require_heartbeat")]
     public bool RequireHeartbeat { get; init; }
 
@@ -418,7 +439,7 @@ public sealed record Policy
     [JsonConverter(typeof(OverageStrategyConverter))]
     public OverageStrategy OverageStrategy { get; init; }
 
-    /// <summary>What happens to a machine row once it's been dead for longer than its resurrection grace window.</summary>
+    /// <summary>What happens to a machine row once it's been dead for longer than its resurrection grace window — only if <see cref="RequireHeartbeat"/> is <see langword="true"/>, which it is not by default.</summary>
     [JsonPropertyName("heartbeat_cull_strategy")]
     [JsonConverter(typeof(HeartbeatCullStrategyConverter))]
     public HeartbeatCullStrategy HeartbeatCullStrategy { get; init; }

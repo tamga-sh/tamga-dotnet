@@ -68,8 +68,20 @@ if (!validation.Valid)
 
 await using var heartbeat = new HeartbeatScheduler(client, machine.Id);
 heartbeat.Pinged += m => Console.WriteLine($"heartbeat ok: {m.HeartbeatStatus}");
-heartbeat.Dead += _ => Console.WriteLine("machine culled server-side — re-activate");
-heartbeat.Faulted += ex => Console.WriteLine($"ping failed: {ex.Message}");
+// DEAD only means "last ping older than the window" — the row and its seat are
+// still there, and the scheduler keeps pinging (which is what revives it).
+heartbeat.Dead += _ => Console.WriteLine("heartbeat window lapsed — still pinging");
+heartbeat.Faulted += ex =>
+{
+    // A 404 from the ping is the one signal that the machine really is gone.
+    if (ex is TamgaNotFoundException)
+    {
+        Console.WriteLine("machine deleted server-side — re-activate");
+        return;
+    }
+
+    Console.WriteLine($"ping failed: {ex.Message}");
+};
 heartbeat.Start();
 ```
 
@@ -288,6 +300,25 @@ around:
 - **`Policy.HeartbeatDuration` does not drive the heartbeat window.** The
   server uses a hardcoded 600 seconds. `HeartbeatScheduler` defaults to about
   a third of that; do not derive an interval from the policy field.
+- **`HeartbeatStatus.Dead` does not mean the machine was culled.** It means one
+  thing only: the last ping is older than the heartbeat window. The server
+  derives `heartbeat_status` from `last_heartbeat_at` alone and never consults
+  `policy.require_heartbeat`, while the cull job that deletes rows early-returns
+  unless `require_heartbeat` is set — and that column defaults to `false`. So on
+  a default policy **nothing is ever culled**, and a machine reports `DEAD`
+  indefinitely with its row and its seat still there. Keep pinging through
+  `DEAD`: the ping succeeds against a dead machine and revives it (server-side
+  it is a bare `SET last_heartbeat_at = NOW()` with no resurrection check).
+  Stopping the loop and re-activating instead burns a second seat. The only
+  authoritative "row is gone" signal is a **`404 NOT_FOUND` from the ping
+  itself** — `HeartbeatScheduler` surfaces it on `Faulted` as
+  `TamgaNotFoundException`; hang re-activation off that, not off `Dead`.
+- **No response carries a `relationships` object.** Every serializer emits
+  `{ type, id, attributes }` only, on licenses and machines alike, so
+  `License.ProductId`/`PolicyId`/`UserId`/`EnvironmentId` and `Machine.LicenseId`
+  can never be populated from a read. All five are `[Obsolete]` and always
+  `null`; track the ids you activated with yourself, or use the dedicated
+  `GET /licenses/{id}/product` · `/policy` · `/owner` routes.
 - **`ResetHeartbeatAsync` and `GenerateOfflineProofAsync` always `403` on a
   license key.** Both are role-gated (admin / developer / product token /
   environment token, plus sales/support agents for proofs) rather than

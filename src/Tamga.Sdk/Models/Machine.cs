@@ -16,7 +16,18 @@ public enum HeartbeatStatus
     /// <summary>Wire value <c>ALIVE</c> — pinged within the window.</summary>
     Alive,
 
-    /// <summary>Wire value <c>DEAD</c> — window elapsed with no ping.</summary>
+    /// <summary>
+    /// Wire value <c>DEAD</c> — the window elapsed with no ping. That is ALL it means.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ It does NOT mean the machine row was culled, deleted, or that its seat was released. The
+    /// server computes this field from <c>last_heartbeat_at</c> alone and never looks at
+    /// <c>policy.require_heartbeat</c>; the cull job that deletes rows is gated on
+    /// <c>require_heartbeat</c>, which defaults to <c>FALSE</c>, so under a default policy nothing
+    /// is ever culled and a machine can report <c>DEAD</c> forever with its row intact. Keep
+    /// pinging — the ping succeeds and revives it. Only a <c>404</c> from the ping proves the row
+    /// is gone. See <see cref="HeartbeatScheduler"/>.
+    /// </remarks>
     Dead,
 
     /// <summary>Wire value <c>RESURRECTED</c> — a new ping arrived after a death event was already recorded, within the resurrection grace window.</summary>
@@ -153,22 +164,19 @@ public sealed record Machine
     /// <summary>When the machine was last checked out (offline <c>.machine</c> file issued).</summary>
     public DateTimeOffset? LastCheckOutAt { get; init; }
 
-    /// <summary>
-    /// The ID of the license this machine is activated against — in practice always
-    /// <see langword="null"/> on a server response.
-    /// </summary>
-    /// <remarks>
-    /// The server's machine serializer emits only <c>{ type, id, attributes }</c>;
-    /// <c>relationships</c> appears on the machine CREATE request body but never on any response,
-    /// so there is nothing for this to be read from. Track the license id you activated with on
-    /// your own side.
-    /// </remarks>
+    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
+    [Obsolete("Always null: the server's machine serializer emits only { type, id, attributes } — `relationships` appears on the machine CREATE request body but never on any response, so there is nothing for this to be read from. Track the license id you activated with on your own side. Scheduled for removal in the next minor release.")]
     public Guid? LicenseId { get; init; }
 
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
     /// <summary>Flattens a raw JSON:API machine resource into a <see cref="Machine"/>. Shared by <see cref="TamgaClient"/> and <see cref="Checkout.MachineFile"/>.</summary>
+    /// <remarks>
+    /// Deliberately does not read <c>data.relationships</c>: the server never emits one on a
+    /// machine response. <c>LicenseId</c>, which used to be populated from it, is obsolete and left
+    /// unset — same defect and same handling as <see cref="License"/>'s four relationship ids.
+    /// </remarks>
     public static Machine FromResource(JsonApiResource<MachineAttributes> resource)
     {
         var attrs = resource.Attributes ?? new MachineAttributes();
@@ -187,7 +195,6 @@ public sealed record Machine
             LastHeartbeatAt = attrs.LastHeartbeatAt,
             NextHeartbeatAt = attrs.NextHeartbeatAt,
             LastCheckOutAt = attrs.LastCheckOutAt,
-            LicenseId = resource.Relationships is { } rels && rels.TryGetValue("license", out var rel) ? rel.Data?.Id : null,
             Metadata = attrs.Metadata,
         };
     }

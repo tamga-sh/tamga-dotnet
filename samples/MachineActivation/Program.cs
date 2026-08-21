@@ -62,11 +62,28 @@ try
 
     // HeartbeatScheduler pings on ~1/3 of the server's hardcoded 600s window by default. This
     // sample runs it for a short window and then stops — a real long-running app would keep it
-    // alive for the process lifetime and react to the Dead event by re-activating.
+    // alive for the whole process lifetime, including across DEAD.
+    //
+    // DEAD is NOT "the machine was culled". heartbeat_status is computed from last_heartbeat_at
+    // alone; the cull job that deletes rows early-returns unless policy.require_heartbeat is set,
+    // and that column defaults to FALSE. On a default policy nothing is ever culled and a machine
+    // reports DEAD indefinitely with its row and seat intact — so keep pinging: the next ping
+    // succeeds and revives it. Re-activation belongs on the 404 path below, not here.
     await using var scheduler = new HeartbeatScheduler(client, machine.Id);
     scheduler.Pinged += m => Console.WriteLine($"  heartbeat ok, status={m.HeartbeatStatus}");
-    scheduler.Dead += _ => Console.WriteLine("  machine observed DEAD — re-activate rather than keep pinging");
-    scheduler.Faulted += ex => Console.WriteLine($"  heartbeat ping failed: {ex.Message}");
+    scheduler.Dead += _ => Console.WriteLine("  heartbeat window lapsed (DEAD) — still pinging, this is recoverable");
+    scheduler.Faulted += ex =>
+    {
+        // 404 is the only authoritative "the machine row is gone" signal. THIS is where a real app
+        // re-activates.
+        if (ex is TamgaNotFoundException)
+        {
+            Console.WriteLine("  machine no longer exists server-side — re-activate");
+            return;
+        }
+
+        Console.WriteLine($"  heartbeat ping failed: {ex.Message}");
+    };
     scheduler.Start();
 
     Console.WriteLine("Heartbeat scheduler running. Press any key to stop...");
