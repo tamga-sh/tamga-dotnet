@@ -638,6 +638,27 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(ServerHeartbeatWindowSeconds / 3.0);
 
     /// <summary>
+    /// The shortest interval this SDK will ever ping at. Anything below it — passed to a scheduler
+    /// constructor, or derived from a very short window by <see cref="IntervalForWindow"/> — is
+    /// raised to this value. See <see cref="IntervalForWindow"/> for why the guard is a floor
+    /// rather than a non-positive check, and for the arithmetic showing what it costs.
+    /// </summary>
+    /// <remarks>
+    /// A <see langword="null"/>, zero or negative value means "unspecified" rather than "too
+    /// fast", and still falls back to <see cref="DefaultInterval"/> rather than to this floor —
+    /// the same split tamga-java draws.
+    /// </remarks>
+    internal static readonly TimeSpan MinimumInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Raises <paramref name="interval"/> to <see cref="MinimumInterval"/> if it falls short.</summary>
+    /// <remarks>
+    /// <see langword="internal"/> so <see cref="ProcessHeartbeatScheduler"/> shares this one floor
+    /// instead of declaring a second that could drift from it.
+    /// </remarks>
+    internal static TimeSpan AtLeastMinimum(TimeSpan interval) =>
+        interval < MinimumInterval ? MinimumInterval : interval;
+
+    /// <summary>
     /// The ping interval for a given heartbeat window — the window divided by three, the same ratio
     /// <see cref="DefaultInterval"/> uses against the 600s fallback.
     /// </summary>
@@ -656,12 +677,40 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// zero or negative interval, which <see cref="PeriodicTimer"/> would reject.
     /// </para>
     /// <para>
+    /// The result is floored at one second, so a very short window cannot become a very fast ping
+    /// loop. The guard has to be a floor and not merely a non-positive check, because
+    /// <see cref="PeriodicTimer"/> rejects zero and negatives but honours a 1ms period
+    /// <em>exactly</em> — measured on net8.0 at ~765 ticks per second. A rule that clamps only
+    /// what the runtime silently converts would therefore clamp <c>0</c> and pass <c>1ms</c>
+    /// through, giving opposite treatment to two inputs with the same observable behaviour: that
+    /// is a property of the runtime's provenance, not of safety. Only a floor bounds the request
+    /// rate. The range is reachable by ordinary mistake, since this parameter is a
+    /// <see cref="TimeSpan"/> while the policy field behind it is <c>heartbeat_duration</c> in
+    /// <em>seconds</em> (see <see cref="Policy.EffectiveHeartbeatWindow"/>), so anyone converting
+    /// units by hand lands in it.
+    /// </para>
+    /// <para>
+    /// The floor costs exactly one thing — the divisor's promise that two consecutive pings may be
+    /// lost — and it degrades gracefully rather than breaking, because the server truncates.
+    /// <c>heartbeat_status_within</c> judges <c>age_secs &lt;= window_secs</c> on a
+    /// <c>num_seconds()</c> value, and <c>num_seconds()</c> truncates
+    /// (<c>Duration::milliseconds(1999).num_seconds() == 1</c>), so a machine first reads
+    /// <c>DEAD</c> at an age of <c>window_secs + 1</c> seconds. Every window therefore carries one
+    /// free second. Window 3 is where floor and divisor first agree (interval 1s, <c>DEAD</c> at
+    /// 4s, 2 losses tolerated); window 2 tolerates 1; window 1 tolerates 0; and window 0 is the
+    /// only value the floor cannot hold. Window 0 is deliberately not served: it would need a
+    /// ~333ms ping, tying this SDK's request rate to <c>num_seconds()</c> truncation — a server
+    /// implementation artifact, not a protocol guarantee — for one nonsensical value.
+    /// </para>
+    /// <para>
     /// Pair with <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>,
     /// which fetches the governing policy and applies this in one call.
     /// </para>
     /// </remarks>
     public static TimeSpan IntervalForWindow(TimeSpan window) =>
-        window > TimeSpan.Zero ? TimeSpan.FromSeconds(window.TotalSeconds / 3.0) : DefaultInterval;
+        window > TimeSpan.Zero
+            ? AtLeastMinimum(TimeSpan.FromSeconds(window.TotalSeconds / 3.0))
+            : DefaultInterval;
 
     private readonly TamgaClient _client;
     private readonly Guid _machineId;
@@ -707,12 +756,62 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="machineId">The ID of the machine to ping.</param>
-    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
+    /// <param name="interval">
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, falls back to it
+    /// when non-positive, and is raised to one second when positive but shorter.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// A zero or negative <paramref name="interval"/> falls back to <see cref="DefaultInterval"/>
+    /// rather than throwing — the same rule <see cref="IntervalForWindow"/> applies, and the same
+    /// rule tamga-go, tamga-java and tamga-swift apply in their own scheduler constructors. It is
+    /// reachable: <c>policy.heartbeat_duration</c> has no <c>CHECK</c> constraint server-side and
+    /// <c>effective_heartbeat_duration_secs</c> returns <c>0</c> or a negative verbatim (only
+    /// <see langword="null"/> falls back to <see cref="ServerHeartbeatWindowSeconds"/>), so a
+    /// caller who sizes an interval from a policy by hand — rather than through
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>, which routes
+    /// through <see cref="IntervalForWindow"/> and is already guarded — can arrive here with one.
+    /// Without this it reached <see cref="PeriodicTimer"/> and threw
+    /// <see cref="ArgumentOutOfRangeException"/> from inside it.
+    /// </para>
+    /// <para>
+    /// <see cref="Timeout.InfiniteTimeSpan"/> (-1ms) is the one exception and is passed through
+    /// unchanged: <see cref="PeriodicTimer"/> accepts it on net8.0 as "never tick", so it already
+    /// worked, and clamping it would silently repurpose a deliberate sentinel. Every other
+    /// non-positive value threw before this and falls back now.
+    /// </para>
+    /// <para>
+    /// A positive <paramref name="interval"/> shorter than one second is raised to one second. The
+    /// timer would have accepted it — <see cref="PeriodicTimer"/> honours a 1ms period exactly, at
+    /// ~765 ticks per second measured on net8.0 — and that is precisely why the guard cannot stop
+    /// at "whatever the runtime refuses": refusing zero avoids a throw, but only a floor bounds the
+    /// request rate. See <see cref="IntervalForWindow"/> for the truncation arithmetic showing the
+    /// floor costs nothing a caller can reach through a policy, and which single window value
+    /// (<c>0</c>) it declines to serve.
+    /// </para>
+    /// </remarks>
     public HeartbeatScheduler(TamgaClient client, Guid machineId, TimeSpan? interval = null)
     {
         _client = client;
         _machineId = machineId;
-        _timer = new PeriodicTimer(interval ?? DefaultInterval);
+        _timer = new PeriodicTimer(TickPeriod(interval));
+    }
+
+    /// <summary>
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <see cref="Timeout.InfiniteTimeSpan"/>
+    /// untouched, <see cref="DefaultInterval"/> for a non-positive <paramref name="interval"/>, and
+    /// otherwise <paramref name="interval"/> raised to <see cref="MinimumInterval"/>. Every value
+    /// this returns is either the sentinel or at least one second. See the constructor's remarks.
+    /// </summary>
+    private static TimeSpan TickPeriod(TimeSpan? interval)
+    {
+        var period = interval ?? DefaultInterval;
+        if (period == Timeout.InfiniteTimeSpan)
+        {
+            return period;
+        }
+
+        return period > TimeSpan.Zero ? AtLeastMinimum(period) : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Idempotent-unsafe: call once per instance.</summary>

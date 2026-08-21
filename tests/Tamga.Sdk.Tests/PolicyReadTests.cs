@@ -197,8 +197,139 @@ public class PolicyReadTests
         Assert.Equal(TimeSpan.FromSeconds(40), HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(120)));
         Assert.Equal(HeartbeatScheduler.DefaultInterval, HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(600)));
         // PeriodicTimer rejects a non-positive period, so a nonsense window must not become one.
+        // A non-positive window means "unspecified", not "very short", so it takes the default
+        // rather than the floor — the same split tamga-java draws.
         Assert.Equal(HeartbeatScheduler.DefaultInterval, HeartbeatScheduler.IntervalForWindow(TimeSpan.Zero));
         Assert.Equal(HeartbeatScheduler.DefaultInterval, HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(-5)));
+    }
+
+    /// <summary>
+    /// A window short enough that a third of it lands under a second yields the floor instead, so
+    /// it is the divisor's two-loss promise that degrades rather than the ping rate that runs away.
+    /// </summary>
+    [Fact]
+    public void IntervalForWindow_FloorsAShortWindowAtOneSecond()
+    {
+        // 3s is the first window where floor and divisor agree exactly; below it the floor binds.
+        Assert.Equal(TimeSpan.FromSeconds(1), HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(3)));
+        Assert.Equal(TimeSpan.FromSeconds(1), HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(2)));
+        Assert.Equal(TimeSpan.FromSeconds(1), HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(1)));
+        // Just above the agreement point the divisor governs again, unfloored.
+        Assert.Equal(TimeSpan.FromSeconds(2), HeartbeatScheduler.IntervalForWindow(TimeSpan.FromSeconds(6)));
+    }
+
+    /// <summary>
+    /// The age at which a machine first reads <c>DEAD</c>, in the server's own terms.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ The server's rule is <b>not</b> <c>age &gt; window</c>. From
+    /// <c>tamga-api/src/features/machines/model.rs::heartbeat_status_within</c>:
+    /// <code>
+    /// let age_secs = (Utc::now() - hb_ts).num_seconds();
+    /// let within_window = age_secs &lt;= window_secs;
+    /// </code>
+    /// and chrono's <c>num_seconds()</c> returns <em>whole</em> seconds, truncating —
+    /// <c>Duration::milliseconds(1999).num_seconds() == 1</c>. So a machine reads <c>DEAD</c> only
+    /// once its age reaches <c>window_secs + 1</c>, and every window carries one free second on top
+    /// of its nominal value. Reading this pessimistically makes a 1s window look unserveable at a
+    /// 1s ping when it in fact has two seconds of slack, and that misreading is what makes the
+    /// floor look broken when it is not.
+    /// </remarks>
+    private static TimeSpan DeadAtAge(int windowSeconds) => TimeSpan.FromSeconds(windowSeconds + 1);
+
+    /// <summary>
+    /// Consecutive pings that can be lost before a read sees <c>DEAD</c>, given a scheduler ticking
+    /// every <paramref name="interval"/>. After <c>m</c> misses the age reaches
+    /// <c>(m + 1) * interval</c>; <c>-1</c> means the window is not held even when no ping is lost.
+    /// </summary>
+    private static int LossesTolerated(int windowSeconds, TimeSpan interval) =>
+        (int)Math.Ceiling(DeadAtAge(windowSeconds).TotalMilliseconds / interval.TotalMilliseconds) - 2;
+
+    /// <summary>
+    /// The floor and the divisor, in one place, against the server's real liveness rule — window
+    /// value by window value, so the interaction is readable rather than re-derived.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// These two numbers interact: for a short enough policy window the floor binds and
+    /// <see cref="HeartbeatScheduler.IntervalForWindow"/>'s stated promise ("two consecutive pings
+    /// can be lost") stops holding. Window 3 is where floor and divisor first agree; 2 keeps one
+    /// spare ping, 1 keeps none, and steady state still holds all three. The one window the floor
+    /// cannot hold is <c>0</c> — not <c>1</c>. <c>heartbeat_duration</c> is an unconstrained
+    /// <c>INTEGER</c> server-side with no <c>CHECK</c>, and
+    /// <c>effective_heartbeat_duration_secs</c> returns <c>0</c> verbatim, so every one of these is
+    /// storable.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>Standing caveat — this is the test that breaks first.</b> Every row here rests on
+    /// <see cref="DeadAtAge"/>, i.e. on <c>num_seconds()</c> truncating. If the server ever
+    /// compares sub-second, that free second disappears: window <c>0</c> becomes unserveable at any
+    /// rate, window <c>1</c> becomes a genuine boundary case rather than a comfortable one, and
+    /// every loss figure below drops by one. Re-derive the table from the server rule before
+    /// changing any number in it — do not adjust an expectation to make this go green.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(600, 200_000, 2)]   // the fallback window: divisor governs, floor irrelevant
+    [InlineData(60, 20_000, 2)]     // an ordinary policy: same
+    [InlineData(3, 1_000, 2)]       // first window where floor and divisor agree exactly
+    [InlineData(2, 1_000, 1)]       // floor binds: promise degraded from 2 losses to 1
+    [InlineData(1, 1_000, 0)]       // floor binds hardest: steady state fine, no loss spare
+    [InlineData(0, 200_000, -1)]    // "unspecified", so the default — and not held either way
+    public void HeartbeatDuration_PinsTheIntervalItProduces_AndTheLossesItTolerates(
+        int heartbeatDuration, int expectedIntervalMs, int expectedLosses)
+    {
+        var window = new Policy { HeartbeatDuration = heartbeatDuration }.EffectiveHeartbeatWindow;
+
+        var interval = HeartbeatScheduler.IntervalForWindow(window);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(expectedIntervalMs), interval);
+        Assert.Equal(expectedLosses, LossesTolerated(heartbeatDuration, interval));
+        // Steady state holds exactly when the loss budget is non-negative.
+        Assert.Equal(expectedLosses >= 0, interval < DeadAtAge(heartbeatDuration));
+        // Whatever the window, the SDK never pings faster than once a second.
+        Assert.True(interval >= TimeSpan.FromSeconds(1));
+    }
+
+    /// <summary>
+    /// <c>heartbeat_duration = 0</c> is the one window the floor cannot hold — and the SDK
+    /// deliberately does not chase it.
+    /// </summary>
+    /// <remarks>
+    /// Truncation gives a 0s window exactly 1000ms of grace, which is precisely the floor, so even
+    /// a ping at the floor arrives at the instant the age reaches the <c>DEAD</c> threshold. A
+    /// ~333ms ping would in fact hold it, and that is exactly why it is not done: it would buy one
+    /// absurd policy value by pinning this SDK's request rate to <c>num_seconds()</c> truncation,
+    /// a server implementation artifact rather than a protocol guarantee. See the standing caveat
+    /// on <see cref="HeartbeatDuration_PinsTheIntervalItProduces_AndTheLossesItTolerates"/>.
+    /// </remarks>
+    [Fact]
+    public void HeartbeatDurationZero_IsTheOneWindowTheFloorCannotHold()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(1), DeadAtAge(0));
+        // Not held at the floor — the counterfactual the fleet contract's table names.
+        Assert.Equal(-1, LossesTolerated(0, TimeSpan.FromSeconds(1)));
+        // Not held at the default this SDK actually produces for it, either.
+        Assert.Equal(-1, LossesTolerated(0, HeartbeatScheduler.IntervalForWindow(TimeSpan.Zero)));
+        // A sub-second ping would hold it. This assertion is the one that flips if the server
+        // ever stops truncating; it is deliberately not what the SDK does.
+        Assert.True(LossesTolerated(0, TimeSpan.FromMilliseconds(333)) >= 0);
+    }
+
+    /// <summary>
+    /// Truncation is what makes a 1s window comfortable rather than a boundary case, so pin it
+    /// directly instead of leaving it implied by the table.
+    /// </summary>
+    [Fact]
+    public void TruncationGivesEveryWindowAFullExtraSecond()
+    {
+        Assert.Equal(TimeSpan.FromSeconds(2), DeadAtAge(1));
+        Assert.Equal(TimeSpan.FromSeconds(3), DeadAtAge(2));
+        Assert.Equal(TimeSpan.FromSeconds(601), DeadAtAge(600));
+        // The pessimistic reading — DEAD the instant age passes the nominal window — would put a
+        // 1s window's deadline at 1000ms and make the 1s floor a boundary case. It is 2000ms, so
+        // the floor has 2x margin.
+        Assert.True(DeadAtAge(1) > TimeSpan.FromSeconds(1));
     }
 
     /// <summary>

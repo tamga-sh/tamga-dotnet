@@ -4,24 +4,41 @@ using Tamga.Sdk.Models;
 
 namespace Tamga.Sdk;
 
-/// <summary>Flat (non-JSON:API-enveloped) keyset-paginated list response shape used by <c>GET /machines/{id}/components</c>.</summary>
-internal sealed record FlatListDocument<T>
-{
-    [JsonPropertyName("data")]
-    public IReadOnlyList<T> Data { get; init; } = Array.Empty<T>();
-
-    [JsonPropertyName("links")]
-    public JsonApiLinks? Links { get; init; }
-}
-
 public sealed partial class TamgaClient
 {
     // ---------------------------------------------------------------
     // §I Components & Processes
     //
-    // GOTCHA: unlike /machines, POST /components and POST /processes use flat, non-JSON:API-
-    // enveloped request AND response bodies — no {"data": {"attributes": ...}} wrapping.
+    // GOTCHA: unlike /machines, POST /components and POST /processes take flat, non-JSON:API-
+    // enveloped REQUEST bodies — {machine_id, fingerprint, name, metadata} straight at the root,
+    // no {"data": {"attributes": …}} wrapping. That asymmetry is real server behaviour and a port
+    // that "normalizes" it will fail against the live API.
+    //
+    // It is REQUEST-ONLY. Every response on these routes — create, ping and both listings — comes
+    // back through components::serializer / processes::serializer as an ordinary JSON:API document
+    // with {type, id, attributes}, exactly like machines and licences. This SDK read the asymmetry
+    // as symmetric and decoded the responses flat, which cost it every attribute on every one of
+    // them; see the commit that introduced these FromResource calls.
     // ---------------------------------------------------------------
+
+    /// <summary>
+    /// Parses a JSON:API single-resource document from a body fetched with
+    /// <see cref="TamgaTransport.SendRawAsync"/>.
+    /// </summary>
+    /// <remarks>
+    /// These four routes go through <c>SendRawAsync</c> rather than
+    /// <see cref="TamgaTransport.SendJsonApiAsync{T}"/> for one reason: the two creates must send
+    /// their flat body as <c>application/json</c>, and <c>SendJsonApiAsync</c> hardcodes
+    /// <c>application/vnd.api+json</c>. The response parsing is identical either way.
+    /// </remarks>
+    private static JsonApiDocument<T> ParseResourceDocument<T>(string body, string what) =>
+        JsonSerializer.Deserialize<JsonApiDocument<T>>(body, TamgaJsonOptions.Default)
+            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = what });
+
+    /// <summary>Parses a JSON:API list document from a body fetched with <see cref="TamgaTransport.SendRawAsync"/>.</summary>
+    private static JsonApiListDocument<T> ParseListDocument<T>(string body, string what) =>
+        JsonSerializer.Deserialize<JsonApiListDocument<T>>(body, TamgaJsonOptions.Default)
+            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = what });
 
     /// <summary><c>POST /components</c> — creates a machine component.</summary>
     /// <exception cref="FingerprintTakenException"><c>409 FINGERPRINT_TAKEN</c> — duplicate fingerprint on the same machine.</exception>
@@ -30,8 +47,8 @@ public sealed partial class TamgaClient
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Post, "/components", jsonBody: request, jsonApiContentType: false, cancellationToken: cancellationToken).ConfigureAwait(false);
         response.Dispose();
-        return JsonSerializer.Deserialize<Component>(body, TamgaJsonOptions.Default)
-            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Create component returned an empty body." });
+        var doc = ParseResourceDocument<Component>(body, "Create component returned an empty body.");
+        return Component.FromResource(doc.Data ?? throw MissingDataError());
     }
 
     /// <summary>The server's maximum (and this SDK's default) page size for component listings — <c>limit</c> is clamped to <c>1..100</c> server-side.</summary>
@@ -83,14 +100,12 @@ public sealed partial class TamgaClient
             HttpMethod.Get, $"/machines/{machineId}/components", query: query, cancellationToken: cancellationToken).ConfigureAwait(false);
         response.Dispose();
 
-        var doc = JsonSerializer.Deserialize<FlatListDocument<Component>>(body, TamgaJsonOptions.Default)
-            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "List components returned an empty body." });
+        var doc = ParseListDocument<Component>(body, "List components returned an empty body.");
+        var items = doc.Data.Select(Component.FromResource).ToList();
         return new Page<Component>
         {
-            Items = doc.Data,
-            // `>= ` not `==`, and the emptiness guard is load-bearing: it keeps `[^1]` off an empty
-            // list no matter what row count the server returns.
-            NextCursor = doc.Data.Count > 0 && doc.Data.Count >= effectiveLimit ? doc.Data[^1].Id.ToString() : null,
+            Items = items,
+            NextCursor = SynthesizeCursor(items.Count, effectiveLimit, items.Count > 0 ? items[^1].Id : Guid.Empty),
         };
     }
 
@@ -107,8 +122,8 @@ public sealed partial class TamgaClient
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Post, "/processes", jsonBody: request, jsonApiContentType: false, cancellationToken: cancellationToken).ConfigureAwait(false);
         response.Dispose();
-        return JsonSerializer.Deserialize<Process>(body, TamgaJsonOptions.Default)
-            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Create process returned an empty body." });
+        var doc = ParseResourceDocument<Process>(body, "Create process returned an empty body.");
+        return Process.FromResource(doc.Data ?? throw MissingDataError());
     }
 
     /// <summary>
@@ -121,9 +136,83 @@ public sealed partial class TamgaClient
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Post, $"/processes/{processId}/actions/ping", jsonApiContentType: false, cancellationToken: cancellationToken).ConfigureAwait(false);
         response.Dispose();
-        return JsonSerializer.Deserialize<Process>(body, TamgaJsonOptions.Default)
-            ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Ping process returned an empty body." });
+        var doc = ParseResourceDocument<Process>(body, "Ping process returned an empty body.");
+        return Process.FromResource(doc.Data ?? throw MissingDataError());
     }
+
+    /// <summary>The server's maximum (and this SDK's default) page size for process listings — <c>limit</c> is clamped to <c>1..100</c> server-side.</summary>
+    private const int MaxProcessesPageSize = 100;
+
+    /// <summary>
+    /// <c>GET /machines/{id}/processes</c> — keyset-paginated (<c>limit</c>/<c>page[after]</c>)
+    /// listing of the processes registered against one machine.
+    /// </summary>
+    /// <param name="machineId">The machine whose processes to list.</param>
+    /// <param name="limit">Page size, <c>1..100</c>. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25. Values above 100 are clamped to match the server's own clamp; values below 1 are rejected.</param>
+    /// <param name="after">The <c>page[after]</c> cursor from a previous page's <see cref="Page{T}.NextCursor"/>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// KEYSET, like the component listing and unlike <see cref="ListMachinesAsync"/> — the server
+    /// emits no <c>meta.page</c> here, so the cursor is synthesized from the last item of a full
+    /// page and there is no total to read. See <see cref="OffsetPage{T}"/> for why the two shapes
+    /// are kept apart.
+    /// </para>
+    /// <para>
+    /// This is the listing that makes leaked process rows visible. Nothing on the server removes
+    /// them (see <see cref="DeleteProcessAsync"/>), so a machine that has been running a
+    /// process-registering worker for months accumulates one row per run — and they count against
+    /// <c>policy.max_processes</c>. Enumerate here to find them; <see cref="DeleteProcessAsync"/>
+    /// to remove them.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="limit"/> is less than 1.</exception>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
+    public async Task<Page<Process>> ListMachineProcessesAsync(Guid machineId, int? limit = null, string? after = null, CancellationToken cancellationToken = default)
+    {
+        if (limit is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(limit), limit, "Page size must be at least 1; pass null for the default of 100.");
+        }
+
+        var effectiveLimit = Math.Min(limit ?? MaxProcessesPageSize, MaxProcessesPageSize);
+        var query = BuildPaginationQuery(effectiveLimit, after);
+        var (body, response) = await _transport.SendRawAsync(
+            HttpMethod.Get, $"/machines/{machineId}/processes", query: query, cancellationToken: cancellationToken).ConfigureAwait(false);
+        response.Dispose();
+
+        var doc = ParseListDocument<Process>(body, "List machine processes returned an empty body.");
+        var items = doc.Data.Select(Process.FromResource).ToList();
+        return new Page<Process>
+        {
+            Items = items,
+            NextCursor = SynthesizeCursor(items.Count, effectiveLimit, items.Count > 0 ? items[^1].Id : Guid.Empty),
+        };
+    }
+
+    /// <summary>
+    /// The <c>page[after]</c> cursor for a keyset listing: the last row's id when the page came
+    /// back full, otherwise <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The server emits no <c>links</c> object on any route, so page fullness measured against a
+    /// known limit is the only end-of-list signal available. <c>&gt;=</c> rather than <c>==</c>,
+    /// and the emptiness guard, keep <c>[^1]</c> off an empty list whatever row count comes back.
+    /// </para>
+    /// <para>
+    /// The all-zero guard is the belt to that braces. A cursor of
+    /// <c>00000000-0000-0000-0000-000000000000</c> sorts before every UUIDv7 row, so feeding one
+    /// back as <c>page[after]</c> returns the same first page again — and a caller looping until
+    /// <see cref="Page{T}.NextCursor"/> goes null would never terminate. No correct decode can
+    /// produce an empty id, but a decode bug can, and silently: this SDK spent its whole life
+    /// decoding these listings flat. A truncated listing is a bad outcome; an infinite loop is a
+    /// worse one, so an empty id ends the walk rather than restarting it.
+    /// </para>
+    /// </remarks>
+    private static string? SynthesizeCursor(int count, int limit, Guid lastId) =>
+        count > 0 && count >= limit && lastId != Guid.Empty ? lastId.ToString() : null;
 
     /// <summary><c>DELETE /processes/{id}</c> — removes a process row. <c>204</c>, no body.</summary>
     /// <param name="processId">The process to delete.</param>
@@ -224,12 +313,46 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     /// <summary>Creates a scheduler for a single process. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="processId">The ID of the process to ping.</param>
-    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
+    /// <param name="interval">
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, falls back to it
+    /// when non-positive, and is raised to one second when positive but shorter.
+    /// </param>
+    /// <remarks>
+    /// Same clamp, and for the same reason, as <see cref="HeartbeatScheduler(TamgaClient, Guid, TimeSpan?)"/>
+    /// — see its remarks. A zero or negative <paramref name="interval"/> falls back to
+    /// <see cref="DefaultInterval"/> instead of reaching <see cref="PeriodicTimer"/> and throwing
+    /// <see cref="ArgumentOutOfRangeException"/>; a positive one shorter than one second is raised
+    /// to one second, because <see cref="PeriodicTimer"/> honours a 1ms period exactly (~765 ticks
+    /// per second on net8.0) and only a floor bounds the request rate; and
+    /// <see cref="Timeout.InfiniteTimeSpan"/>, which the timer accepts as "never tick", is passed
+    /// through unchanged. The process window is not policy-driven (it is a hardcoded 30s
+    /// server-side), so a bad value cannot arrive here from a policy — but a caller computing an
+    /// interval arithmetically can still produce one, and the two schedulers should not answer the
+    /// same mistake differently.
+    /// </remarks>
     public ProcessHeartbeatScheduler(TamgaClient client, Guid processId, TimeSpan? interval = null)
     {
         _client = client;
         _processId = processId;
-        _timer = new PeriodicTimer(interval ?? DefaultInterval);
+        _timer = new PeriodicTimer(TickPeriod(interval));
+    }
+
+    /// <summary>
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <see cref="Timeout.InfiniteTimeSpan"/>
+    /// untouched, <see cref="DefaultInterval"/> for a non-positive <paramref name="interval"/>, and
+    /// otherwise <paramref name="interval"/> raised to
+    /// <see cref="HeartbeatScheduler.MinimumInterval"/>. Every value this returns is either the
+    /// sentinel or at least one second. See the constructor's remarks.
+    /// </summary>
+    private static TimeSpan TickPeriod(TimeSpan? interval)
+    {
+        var period = interval ?? DefaultInterval;
+        if (period == Timeout.InfiniteTimeSpan)
+        {
+            return period;
+        }
+
+        return period > TimeSpan.Zero ? HeartbeatScheduler.AtLeastMinimum(period) : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Call once per instance.</summary>
