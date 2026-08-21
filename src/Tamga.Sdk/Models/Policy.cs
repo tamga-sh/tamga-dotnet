@@ -265,23 +265,39 @@ public sealed class HeartbeatResurrectionStrategyConverter : JsonConverter<Heart
 /// How often check-in is required, if <c>require_check_in</c> is set. Wire values are lowercase —
 /// inconsistent with the SCREAMING_SNAKE_CASE convention used by every other enum in this SDK.
 /// </summary>
+/// <remarks>
+/// ⚠ The wire spelling is the ADVERBIAL form: <c>daily</c>/<c>weekly</c>/<c>monthly</c>/
+/// <c>yearly</c>. That is what the column's own <c>CHECK</c> constraint permits, and it is the
+/// only spelling a stored policy can hold. The noun forms <c>day</c>/<c>week</c>/<c>month</c>/
+/// <c>year</c> are also decoded, defensively, because an earlier version of this SDK's
+/// documentation claimed they were the wire values.
+///
+/// Read this together with <see cref="Policy.CheckInIntervalCount"/> — the interval is
+/// <c>count × unit</c>, so this value alone is the period only when the count is 1.
+/// </remarks>
 [JsonConverter(typeof(CheckInIntervalConverter))]
 public enum CheckInInterval
 {
-    /// <summary>Wire value <c>day</c>.</summary>
+    /// <summary>Wire value <c>daily</c>.</summary>
     Day,
 
-    /// <summary>Wire value <c>week</c>.</summary>
+    /// <summary>Wire value <c>weekly</c>.</summary>
     Week,
 
-    /// <summary>Wire value <c>month</c>.</summary>
+    /// <summary>Wire value <c>monthly</c>.</summary>
     Month,
 
-    /// <summary>Wire value <c>year</c>.</summary>
+    /// <summary>Wire value <c>yearly</c>.</summary>
     Year,
 }
 
 /// <summary>Converts <see cref="CheckInInterval"/> to/from its lowercase wire string.</summary>
+/// <remarks>
+/// Both the adverbial wire spellings (<c>daily</c>…, what the server actually stores) and the noun
+/// spellings (<c>day</c>…, which older SDK docs wrongly advertised) decode. Unrecognized values
+/// fall back to <see cref="CheckInInterval.Day"/> — the shortest interval, so a policy this SDK
+/// cannot read is over-served rather than under-served.
+/// </remarks>
 public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
 {
     /// <summary>Deserializes the lowercase wire string into a <see cref="CheckInInterval"/>.</summary>
@@ -289,9 +305,9 @@ public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
     {
         return reader.GetString() switch
         {
-            "week" => CheckInInterval.Week,
-            "month" => CheckInInterval.Month,
-            "year" => CheckInInterval.Year,
+            "weekly" or "week" => CheckInInterval.Week,
+            "monthly" or "month" => CheckInInterval.Month,
+            "yearly" or "year" => CheckInInterval.Year,
             _ => CheckInInterval.Day,
         };
     }
@@ -301,10 +317,10 @@ public sealed class CheckInIntervalConverter : JsonConverter<CheckInInterval>
     {
         writer.WriteStringValue(value switch
         {
-            CheckInInterval.Week => "week",
-            CheckInInterval.Month => "month",
-            CheckInInterval.Year => "year",
-            _ => "day",
+            CheckInInterval.Week => "weekly",
+            CheckInInterval.Month => "monthly",
+            CheckInInterval.Year => "yearly",
+            _ => "daily",
         });
     }
 }
@@ -369,17 +385,69 @@ public static class PolicyStrategies
 }
 
 /// <summary>
-/// A license policy's full attribute set. The server's <c>GET</c> response omits
-/// <see cref="MaxMemory"/> and <see cref="MaxDisk"/> even though both are enforced during
-/// validation — an SDK cannot introspect these two limits client-side, only observe
-/// <c>TooMuchMemory</c>/<c>TooMuchDisk</c> on validation failure. Model them nullable, never
-/// required.
+/// A license policy resource, flattened from the JSON:API <c>data.attributes</c> + <c>data.id</c>
+/// shape by <see cref="FromResource"/>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The server's policy serializer emits exactly 30 attributes. Every one of them has a property
+/// here; enumerate them against the serializer rather than trusting this sentence, and add the
+/// missing one rather than shipping a model that silently drops it. This type spent its first
+/// releases modelling 16 of the 30 — <c>product_id</c>, <c>name</c>, <c>duration</c>,
+/// <c>strict</c>, <c>floating</c>, <c>encrypted</c>, <c>use_pool</c>, <c>protected</c>,
+/// <c>check_in_interval_count</c>, <c>machine_uniqueness_strategy</c>, <c>expiration_basis</c>,
+/// <c>max_users</c>, <c>created</c> and <c>updated</c> were all absent, which is the same defect
+/// the licence model shipped with and the reason that list is written out here.
+/// </para>
+/// <para>
+/// The two properties that go the other way — <see cref="MaxMemory"/> and <see cref="MaxDisk"/> —
+/// are NOT on the server's response even though both are enforced during validation. They are
+/// always <see langword="null"/> after <see cref="FromResource"/>; the limits can only be observed
+/// as <see cref="ValidationCode.TooMuchMemory"/>/<see cref="ValidationCode.TooMuchDisk"/> on a
+/// failed validation.
+/// </para>
+/// <para>
+/// No <c>relationships</c> object exists on this resource either (no serializer in the API emits
+/// one), which is why <see cref="ProductId"/> is a plain attribute rather than a linkage.
+/// </para>
+/// </remarks>
 public sealed record Policy
 {
-    /// <summary>The policy's unique identifier.</summary>
+    /// <summary>The policy's unique identifier. Read from <c>data.id</c>, not from <c>attributes</c>.</summary>
     [JsonPropertyName("id")]
     public Guid Id { get; init; }
+
+    /// <summary>The product this policy belongs to. A plain attribute — the resource carries no <c>relationships</c> object.</summary>
+    [JsonPropertyName("product_id")]
+    public Guid ProductId { get; init; }
+
+    /// <summary>The policy's display name.</summary>
+    [JsonPropertyName("name")]
+    public string? Name { get; init; }
+
+    /// <summary>How long a license issued under this policy lasts, in seconds, or <see langword="null"/> for perpetual.</summary>
+    [JsonPropertyName("duration")]
+    public long? Duration { get; init; }
+
+    /// <summary>Whether validation is strict (an unfulfilled requirement fails rather than warns).</summary>
+    [JsonPropertyName("strict")]
+    public bool Strict { get; init; }
+
+    /// <summary>Whether one license may be shared across several machines concurrently.</summary>
+    [JsonPropertyName("floating")]
+    public bool Floating { get; init; }
+
+    /// <summary>Whether licenses under this policy are issued encrypted.</summary>
+    [JsonPropertyName("encrypted")]
+    public bool Encrypted { get; init; }
+
+    /// <summary>Whether license keys are drawn from a pre-generated pool instead of minted on creation.</summary>
+    [JsonPropertyName("use_pool")]
+    public bool UsePool { get; init; }
+
+    /// <summary>Whether end users are blocked from self-deleting licenses under this policy.</summary>
+    [JsonPropertyName("protected")]
+    public bool Protected { get; init; }
 
     /// <summary>The maximum number of machines allowed under this policy.</summary>
     [JsonPropertyName("max_machines")]
@@ -397,6 +465,14 @@ public sealed record Policy
     [JsonPropertyName("max_uses")]
     public int? MaxUses { get; init; }
 
+    /// <summary>The maximum number of users allowed under this policy.</summary>
+    /// <remarks>
+    /// Modeled for completeness. <see cref="ValidationCode.TooManyUsers"/> has no construction site
+    /// server-side, so exceeding this limit is not currently reported by validation.
+    /// </remarks>
+    [JsonPropertyName("max_users")]
+    public int? MaxUsers { get; init; }
+
     /// <summary>Not present on the server's GET response even though it is enforced — see type-level remarks.</summary>
     [JsonPropertyName("max_memory")]
     public int? MaxMemory { get; init; }
@@ -413,6 +489,17 @@ public sealed record Policy
     [JsonPropertyName("check_in_interval")]
     [JsonConverter(typeof(CheckInIntervalConverter))]
     public CheckInInterval? CheckInInterval { get; init; }
+
+    /// <summary>
+    /// Multiplier applied to <see cref="CheckInInterval"/> — e.g. <c>2</c> with
+    /// <see cref="Models.CheckInInterval.Week"/> means "check in every two weeks".
+    /// </summary>
+    /// <remarks>
+    /// Reading <see cref="CheckInInterval"/> without this gives the wrong period whenever the
+    /// count is not 1.
+    /// </remarks>
+    [JsonPropertyName("check_in_interval_count")]
+    public int? CheckInIntervalCount { get; init; }
 
     /// <summary>Whether machines must send periodic heartbeats to stay alive. Server default: <see langword="false"/>.</summary>
     /// <remarks>
@@ -437,16 +524,38 @@ public sealed record Policy
     /// job measures against <c>COALESCE(p.heartbeat_duration, 600)</c>, and
     /// <c>heartbeat_status</c>/<c>next_heartbeat_at</c> are derived from the same window.
     ///
-    /// Using this to size a client-side ping interval is therefore correct in principle, and this
-    /// SDK gives you no way to fetch a <see cref="Policy"/> to read it from — which is why
-    /// <see cref="HeartbeatScheduler.DefaultInterval"/> is computed from the 600s fallback and why
-    /// a caller on a shorter-window policy has to supply the interval themselves. That does not
-    /// leave them guessing: the same window is recoverable as
-    /// <c>NextHeartbeatAt - LastHeartbeatAt</c> from a checked-out <c>.machine</c> file, without
-    /// this field or a policy getter (see <see cref="Machine.NextHeartbeatAt"/>).
+    /// Using this to size a client-side ping interval is correct, and there are now two ways to
+    /// get at it: <see cref="TamgaClient.GetLicensePolicyAsync"/> reads it straight off the
+    /// governing policy, and a checked-out <c>.machine</c> file still yields the same window as
+    /// <c>NextHeartbeatAt - LastHeartbeatAt</c> (see <see cref="Machine.NextHeartbeatAt"/>) for
+    /// callers who cannot reach the policy route. <see cref="EffectiveHeartbeatDurationSeconds"/>
+    /// applies the server's own fallback so a caller never has to remember which of the two cases
+    /// they are in.
+    ///
+    /// <see cref="HeartbeatScheduler.DefaultInterval"/> is still computed from the 600s fallback
+    /// and still does not adapt on its own — a scheduler sized from a policy has to be constructed
+    /// with the interval, e.g. from
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>.
     /// </remarks>
     [JsonPropertyName("heartbeat_duration")]
     public int? HeartbeatDuration { get; init; }
+
+    /// <summary>
+    /// The heartbeat window actually in force, in seconds: <see cref="HeartbeatDuration"/> when the
+    /// policy sets it, otherwise the server's 600s fallback.
+    /// </summary>
+    /// <remarks>
+    /// Mirrors <c>Policy::effective_heartbeat_duration_secs</c>
+    /// (<c>heartbeat_duration.map(i64::from).unwrap_or(600)</c>) exactly, which is the same value
+    /// the culling job measures against via <c>COALESCE(p.heartbeat_duration, 600)</c>. Prefer this
+    /// over reading <see cref="HeartbeatDuration"/> directly — a <see langword="null"/> there does
+    /// not mean "no window".
+    /// </remarks>
+    public int EffectiveHeartbeatDurationSeconds =>
+        HeartbeatDuration ?? HeartbeatScheduler.ServerHeartbeatWindowSeconds;
+
+    /// <summary><see cref="EffectiveHeartbeatDurationSeconds"/> as a <see cref="TimeSpan"/>.</summary>
+    public TimeSpan EffectiveHeartbeatWindow => TimeSpan.FromSeconds(EffectiveHeartbeatDurationSeconds);
 
     /// <summary>How overage beyond the policy's <c>max_*</c> limits is tolerated.</summary>
     [JsonPropertyName("overage_strategy")]
@@ -471,6 +580,29 @@ public sealed record Policy
     /// </remarks>
     [JsonPropertyName("expiration_strategy")]
     public string? ExpirationStrategy { get; init; }
+
+    /// <summary>
+    /// When a new license's expiry clock starts. Free text; the server's own constraint allows
+    /// <c>FROM_CREATION</c> (the default), <c>FROM_FIRST_VALIDATION</c>,
+    /// <c>FROM_FIRST_ACTIVATION</c>, <c>FROM_FIRST_DOWNLOAD</c> and <c>FROM_FIRST_USE</c>.
+    /// </summary>
+    [JsonPropertyName("expiration_basis")]
+    public string? ExpirationBasis { get; init; }
+
+    /// <summary>
+    /// The scope a machine fingerprint must be unique within. Free text; the server's own
+    /// constraint allows <c>UNIQUE_PER_LICENSE</c> (the default), <c>UNIQUE_PER_POLICY</c> and
+    /// <c>UNIQUE_PER_ACCOUNT</c>.
+    /// </summary>
+    /// <remarks>
+    /// Worth reading before interpreting a <see cref="FingerprintTakenException"/>: under
+    /// <c>UNIQUE_PER_POLICY</c> or <c>UNIQUE_PER_ACCOUNT</c> the machine that already holds the
+    /// fingerprint may belong to a DIFFERENT license, so "already activated, carry on" is not a
+    /// safe reading of the 409 on those policies. See
+    /// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>.
+    /// </remarks>
+    [JsonPropertyName("machine_uniqueness_strategy")]
+    public string? MachineUniquenessStrategy { get; init; }
 
     /// <summary>Free text, no backing enum — see <see cref="PolicyStrategies"/>. Server default is <see cref="PolicyStrategies.FromExpiry"/>.</summary>
     [JsonPropertyName("renewal_basis")]
@@ -501,4 +633,26 @@ public sealed record Policy
     /// <summary>Arbitrary key/value metadata attached to the policy.</summary>
     [JsonPropertyName("metadata")]
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
+
+    /// <summary>When the policy was created.</summary>
+    [JsonPropertyName("created")]
+    public DateTimeOffset? Created { get; init; }
+
+    /// <summary>When the policy was last updated.</summary>
+    [JsonPropertyName("updated")]
+    public DateTimeOffset? Updated { get; init; }
+
+    /// <summary>
+    /// Flattens a raw JSON:API policy resource into a <see cref="Policy"/>, taking
+    /// <see cref="Id"/> from <c>data.id</c> and everything else from <c>data.attributes</c>.
+    /// </summary>
+    /// <remarks>
+    /// This type doubles as its own attributes bag: <c>attributes</c> deserializes straight into a
+    /// <see cref="Policy"/> (leaving <see cref="Id"/> at its default, since <c>id</c> lives one
+    /// level up) and the id is grafted on here. That keeps one property list instead of two that
+    /// can drift apart — which is exactly how attributes went missing from this model before.
+    /// </remarks>
+    /// <param name="resource">The JSON:API resource object to flatten.</param>
+    public static Policy FromResource(JsonApiResource<Policy> resource) =>
+        (resource.Attributes ?? new Policy()) with { Id = resource.Id };
 }

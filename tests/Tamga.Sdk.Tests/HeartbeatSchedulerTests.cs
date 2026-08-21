@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using Tamga.Sdk.Models;
 using Tamga.Sdk.Tests.Support;
@@ -8,6 +9,22 @@ namespace Tamga.Sdk.Tests;
 
 public class HeartbeatSchedulerTests
 {
+    /// <summary>
+    /// The interval every loop-behaviour test below ticks at. It is the floor, and it has to be:
+    /// <see cref="HeartbeatScheduler"/> raises anything shorter to one second, so the 10ms these
+    /// tests used to pass would silently become this anyway. Naming it keeps the test honest about
+    /// how long a tick really takes.
+    /// </summary>
+    private static readonly TimeSpan TickInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>
+    /// How long a loop-behaviour test waits for its signal. Deliberately generous: at
+    /// <see cref="TickInterval"/> the longest of these needs four real ticks, and the CI matrix's
+    /// slowest leg (<c>test (windows-latest)</c>, ~3m09s against ~45s for ubuntu) has no headroom
+    /// to spare. A tight bound here buys nothing and flakes under load.
+    /// </summary>
+    private static readonly TimeSpan LoopTimeout = TimeSpan.FromSeconds(30);
+
     private static (TamgaClient Client, MockHttpMessageHandler Handler) MakeClient()
     {
         var handler = new MockHttpMessageHandler();
@@ -65,7 +82,7 @@ public class HeartbeatSchedulerTests
         Machine? dead = null;
         var deadSignal = new TaskCompletionSource();
 
-        await using var scheduler = new HeartbeatScheduler(client, machineId, TimeSpan.FromMilliseconds(10));
+        await using var scheduler = new HeartbeatScheduler(client, machineId, TickInterval);
         scheduler.Pinged += m => pinged.Add(m);
         scheduler.Dead += m =>
         {
@@ -74,7 +91,7 @@ public class HeartbeatSchedulerTests
         };
         scheduler.Start();
 
-        await deadSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await deadSignal.Task.WaitAsync(LoopTimeout);
 
         Assert.True(pinged.Count >= 2);
         Assert.NotNull(dead);
@@ -125,7 +142,7 @@ public class HeartbeatSchedulerTests
         var faultsAtRevival = -1;
         var revived = new TaskCompletionSource();
 
-        await using (var scheduler = new HeartbeatScheduler(client, machineId, TimeSpan.FromMilliseconds(10)))
+        await using (var scheduler = new HeartbeatScheduler(client, machineId, TickInterval))
         {
             scheduler.Pinged += m =>
             {
@@ -140,7 +157,7 @@ public class HeartbeatSchedulerTests
             scheduler.Faulted += faults.Add;
             scheduler.Start();
 
-            await revived.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await revived.Task.WaitAsync(LoopTimeout);
         }
 
         // Four pings actually left the client: the loop did not stop at the first DEAD, nor at the
@@ -175,7 +192,7 @@ public class HeartbeatSchedulerTests
         Exception? fault = null;
         var faulted = new TaskCompletionSource();
 
-        await using (var scheduler = new HeartbeatScheduler(client, machineId, TimeSpan.FromMilliseconds(10)))
+        await using (var scheduler = new HeartbeatScheduler(client, machineId, TickInterval))
         {
             scheduler.Faulted += ex =>
             {
@@ -184,7 +201,7 @@ public class HeartbeatSchedulerTests
             };
             scheduler.Start();
 
-            await faulted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await faulted.Task.WaitAsync(LoopTimeout);
         }
 
         Assert.IsType<TamgaNotFoundException>(fault);
@@ -227,7 +244,7 @@ public class HeartbeatSchedulerTests
         var secondPingSignal = new TaskCompletionSource();
         var pingCount = 0;
 
-        await using var scheduler = new HeartbeatScheduler(client, machineId, TimeSpan.FromMilliseconds(10));
+        await using var scheduler = new HeartbeatScheduler(client, machineId, TickInterval);
         scheduler.Pinged += _ =>
         {
             pingCount++;
@@ -241,8 +258,8 @@ public class HeartbeatSchedulerTests
         scheduler.Faulted += _ => faultedSignal.TrySetResult();
         scheduler.Start();
 
-        await faultedSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
-        await secondPingSignal.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await faultedSignal.Task.WaitAsync(LoopTimeout);
+        await secondPingSignal.Task.WaitAsync(LoopTimeout);
 
         Assert.True(pingCount >= 2);
     }
@@ -264,14 +281,32 @@ public class HeartbeatSchedulerTests
     {
         var (client, handler) = MakeClient();
         var processId = Guid.NewGuid();
-        string ResourceJson() => $$"""{"id":"{{processId}}","machine_id":"{{Guid.NewGuid()}}","pid":"123"}""";
-        handler.Enqueue(HttpStatusCode.OK, ResourceJson(), contentType: "application/json");
-        handler.Enqueue(HttpStatusCode.OK, ResourceJson(), contentType: "application/json");
+        // JSON:API-enveloped, per processes/serializer.rs — the ping response is a {type, id,
+        // attributes} document, not the flat object the REQUEST bodies on these routes use.
+        string ResourceJson() => new JsonObject
+        {
+            ["data"] = new JsonObject
+            {
+                ["type"] = "processes",
+                ["id"] = processId.ToString(),
+                ["attributes"] = new JsonObject
+                {
+                    ["pid"] = "123",
+                    ["machine_id"] = Guid.NewGuid().ToString(),
+                    ["last_heartbeat_at"] = "2026-01-02T03:04:05Z",
+                    ["metadata"] = new JsonObject(),
+                    ["created"] = "2026-01-02T03:04:05Z",
+                    ["updated"] = "2026-01-02T03:04:05Z",
+                },
+            },
+        }.ToJsonString();
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
 
         var pingedCount = 0;
         var secondPing = new TaskCompletionSource();
 
-        await using var scheduler = new ProcessHeartbeatScheduler(client, processId, TimeSpan.FromMilliseconds(10));
+        await using var scheduler = new ProcessHeartbeatScheduler(client, processId, TickInterval);
         scheduler.Pinged += _ =>
         {
             pingedCount++;
@@ -282,7 +317,265 @@ public class HeartbeatSchedulerTests
         };
         scheduler.Start();
 
-        await secondPing.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await secondPing.Task.WaitAsync(LoopTimeout);
         Assert.True(pingedCount >= 2);
+    }
+
+    /// <summary>
+    /// A ping can fail with nobody listening. <c>Faulted</c> is an event, so it is null until a
+    /// caller subscribes, and the loop must survive raising it into thin air rather than dying of
+    /// a <see cref="NullReferenceException"/> on an error path.
+    /// </summary>
+    /// <remarks>
+    /// Same provenance as the test below: the unsubscribed branch used to be reached only by the
+    /// disposal test's incidental tick, and the floor removed that tick. It is worth an explicit
+    /// test on its own merits — an unobserved fault is the normal case for a caller who never
+    /// wires the event.
+    /// </remarks>
+    [Fact]
+    public async Task ProcessHeartbeatScheduler_SurvivesAFailedPing_WithNoFaultedSubscriber()
+    {
+        var (client, handler) = MakeClient();
+        var processId = Guid.NewGuid();
+        string ResourceJson() => new JsonObject
+        {
+            ["data"] = new JsonObject
+            {
+                ["type"] = "processes",
+                ["id"] = processId.ToString(),
+                ["attributes"] = new JsonObject
+                {
+                    ["pid"] = "123",
+                    ["machine_id"] = Guid.NewGuid().ToString(),
+                    ["last_heartbeat_at"] = "2026-01-02T03:04:05Z",
+                    ["metadata"] = new JsonObject(),
+                    ["created"] = "2026-01-02T03:04:05Z",
+                    ["updated"] = "2026-01-02T03:04:05Z",
+                },
+            },
+        }.ToJsonString();
+
+        // First tick faults with no subscriber attached; the second must still arrive.
+        handler.Enqueue(
+            HttpStatusCode.InternalServerError,
+            """{"errors":[{"id":"1","status":"500","code":"INTERNAL_SERVER_ERROR","title":"Error","detail":"boom"}]}""");
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
+
+        var pinged = new TaskCompletionSource();
+
+        await using (var scheduler = new ProcessHeartbeatScheduler(client, processId, TickInterval))
+        {
+            // Deliberately no Faulted subscriber.
+            scheduler.Pinged += _ => pinged.TrySetResult();
+            scheduler.Start();
+
+            // Reaching a successful ping proves the unobserved fault did not kill the loop.
+            await pinged.Task.WaitAsync(LoopTimeout);
+        }
+
+        Assert.True(handler.Requests.Count >= 2);
+    }
+
+    /// <summary>
+    /// A failed process ping lands on <see cref="ProcessHeartbeatScheduler.Faulted"/> and the loop
+    /// carries on, exactly as the machine scheduler's does.
+    /// </summary>
+    /// <remarks>
+    /// This path used to be covered only incidentally, by a disposal test that passed a 10ms
+    /// interval and raced a tick into a 30ms window. The one-second floor ended that race — the
+    /// tick no longer lands — and the coverage went with it, which is how the gap surfaced.
+    /// Depending on a race for coverage of an error path was the real defect; an explicit test that
+    /// waits for the signal replaces it.
+    /// </remarks>
+    [Fact]
+    public async Task ProcessHeartbeatScheduler_ReportsAFailedPingOnFaulted_AndKeepsGoing()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(
+            HttpStatusCode.InternalServerError,
+            """{"errors":[{"id":"1","status":"500","code":"INTERNAL_SERVER_ERROR","title":"Error","detail":"boom"}]}""");
+
+        Exception? fault = null;
+        var faulted = new TaskCompletionSource();
+
+        await using (var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TickInterval))
+        {
+            scheduler.Faulted += ex =>
+            {
+                fault ??= ex;
+                faulted.TrySetResult();
+            };
+            scheduler.Start();
+
+            await faulted.Task.WaitAsync(LoopTimeout);
+        }
+
+        Assert.IsType<TamgaInternalServerErrorException>(fault);
+    }
+
+    /// <summary>
+    /// Reads the period a scheduler actually handed to its <see cref="PeriodicTimer"/>. Nothing
+    /// public exposes it, and reflection is deliberate: without it these tests could only assert
+    /// "the constructor did not throw", which would pass equally on a clamp to the default and on
+    /// a clamp to some arbitrary other value.
+    /// </summary>
+    private static TimeSpan ConfiguredPeriod(object scheduler)
+    {
+        var field = scheduler.GetType().GetField("_timer", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var timer = Assert.IsType<PeriodicTimer>(field!.GetValue(scheduler));
+        return timer.Period;
+    }
+
+    /// <summary>
+    /// Regression: a non-positive interval falls back to <see cref="HeartbeatScheduler.DefaultInterval"/>
+    /// instead of reaching <see cref="PeriodicTimer"/> and throwing
+    /// <see cref="ArgumentOutOfRangeException"/> from inside it.
+    /// </summary>
+    /// <remarks>
+    /// Reachable from real data: <c>policy.heartbeat_duration</c> carries no <c>CHECK</c>
+    /// constraint server-side and <c>effective_heartbeat_duration_secs</c> hands back <c>0</c> or a
+    /// negative verbatim, so only a caller who goes through
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/> — and so
+    /// through the already-guarded <see cref="HeartbeatScheduler.IntervalForWindow"/> — is safe.
+    /// One who does the division themselves lands here. tamga-go, tamga-java and tamga-swift all
+    /// clamp in their scheduler constructor; this pins that tamga-dotnet now does too.
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-600)]
+    public async Task HeartbeatScheduler_NonPositiveInterval_FallsBackToDefault_RatherThanThrowing(int seconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(seconds));
+
+        Assert.Equal(HeartbeatScheduler.DefaultInterval, ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>
+    /// The clamp touches only inputs that used to throw. A positive interval, and an omitted one,
+    /// still mean exactly what they always did — and <see cref="Timeout.InfiniteTimeSpan"/>, the
+    /// one non-positive value <see cref="PeriodicTimer"/> accepts on net8.0 (as "never tick"),
+    /// survives unchanged rather than being silently repurposed into a ~200s ping loop.
+    /// </summary>
+    [Fact]
+    public async Task HeartbeatScheduler_IntervalsTheTimerAlreadyAccepted_AreUnchanged()
+    {
+        var (client, _) = MakeClient();
+
+        await using var explicitInterval = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(7));
+        await using var omitted = new HeartbeatScheduler(client, Guid.NewGuid());
+        await using var infinite = new HeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+
+        Assert.Equal(TimeSpan.FromSeconds(7), ConfiguredPeriod(explicitInterval));
+        Assert.Equal(HeartbeatScheduler.DefaultInterval, ConfiguredPeriod(omitted));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(infinite));
+    }
+
+    /// <summary>
+    /// The process scheduler had the identical unguarded constructor and gets the identical clamp —
+    /// the two must not answer the same caller mistake differently. Note the fallback is
+    /// <see cref="ProcessHeartbeatScheduler.DefaultInterval"/> (~10s), not the machine one: the
+    /// process heartbeat window is a hardcoded 30s server-side.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-30)]
+    public async Task ProcessHeartbeatScheduler_NonPositiveInterval_FallsBackToDefault_RatherThanThrowing(int seconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(seconds));
+
+        Assert.Equal(ProcessHeartbeatScheduler.DefaultInterval, ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>
+    /// The floor, stated as the behaviour change it is: half a second becomes one second. Before
+    /// this the value was passed straight through, because the old guard only asked whether
+    /// <see cref="PeriodicTimer"/> would reject it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Why the guard could not stay a non-positive check, measured on net8.0 rather than reasoned
+    /// about: <see cref="PeriodicTimer"/> rejects <see cref="TimeSpan.Zero"/> and every negative
+    /// except the <see cref="Timeout.InfiniteTimeSpan"/> sentinel, and it also rejects anything
+    /// under a millisecond (<c>TimeSpan.FromMilliseconds(0.5)</c> and <c>TimeSpan.FromTicks(1)</c>
+    /// both throw) — but it honours a 1ms period <em>exactly</em>, ticking ~765 times a second.
+    /// A rule drawn around what the runtime refuses therefore clamps <c>0</c> and waves <c>1ms</c>
+    /// through, giving opposite treatment to two inputs with the same observable behaviour. That
+    /// describes where a number came from, not what it does. Only a floor bounds the request rate.
+    /// </para>
+    /// <para>
+    /// Reachable by ordinary mistake: this parameter is a <see cref="TimeSpan"/> while the policy
+    /// field behind it, <c>heartbeat_duration</c>, is in <em>seconds</em>, so anyone converting
+    /// units by hand lands in the sub-second range.
+    /// </para>
+    /// </remarks>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(500)]
+    [InlineData(999)]
+    public async Task HeartbeatScheduler_PositiveSubSecondInterval_IsRaisedToOneSecond(int milliseconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMilliseconds(milliseconds));
+
+        Assert.Equal(TimeSpan.FromSeconds(1), ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>
+    /// The process scheduler shares the machine scheduler's single floor constant rather than
+    /// declaring a second one that could drift from it, so the same input gets the same answer.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(500)]
+    [InlineData(999)]
+    public async Task ProcessHeartbeatScheduler_PositiveSubSecondInterval_IsRaisedToOneSecond(int milliseconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMilliseconds(milliseconds));
+
+        Assert.Equal(TimeSpan.FromSeconds(1), ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>
+    /// The floor raises; it never lowers, and it never touches the sentinel. One second exactly is
+    /// on the floor and stays put, and <see cref="Timeout.InfiniteTimeSpan"/> — which is negative
+    /// and so would be caught by a naive <c>&lt; 1s</c> test — still means "never tick".
+    /// </summary>
+    [Fact]
+    public async Task HeartbeatScheduler_FloorRaisesWithoutTouchingTheBoundaryOrTheSentinel()
+    {
+        var (client, _) = MakeClient();
+
+        await using var onTheFloor = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(1));
+        await using var infinite = new HeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+        await using var processInfinite = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+
+        Assert.Equal(TimeSpan.FromSeconds(1), ConfiguredPeriod(onTheFloor));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(infinite));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(processInfinite));
+    }
+
+    /// <summary>The process-scheduler counterpart to the pass-through assertions above.</summary>
+    [Fact]
+    public async Task ProcessHeartbeatScheduler_IntervalsTheTimerAlreadyAccepted_AreUnchanged()
+    {
+        var (client, _) = MakeClient();
+
+        await using var explicitInterval = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(3));
+        await using var omitted = new ProcessHeartbeatScheduler(client, Guid.NewGuid());
+        await using var infinite = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+
+        Assert.Equal(TimeSpan.FromSeconds(3), ConfiguredPeriod(explicitInterval));
+        Assert.Equal(ProcessHeartbeatScheduler.DefaultInterval, ConfiguredPeriod(omitted));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(infinite));
     }
 }

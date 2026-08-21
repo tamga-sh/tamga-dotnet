@@ -66,7 +66,13 @@ if (!validation.Valid)
     return;
 }
 
-await using var heartbeat = new HeartbeatScheduler(client, machine.Id);
+// Size the ping interval from the policy that actually governs the machine.
+// The 600s figure DefaultInterval is derived from is only the server's
+// fallback; a policy that sets heartbeat_duration to 120 needs a ~40s ping,
+// and nothing detects that for you. One round trip at activation time.
+TimeSpan interval = await client.GetHeartbeatIntervalAsync(licenseId);
+
+await using var heartbeat = new HeartbeatScheduler(client, machine.Id, interval);
 heartbeat.Pinged += m => Console.WriteLine($"heartbeat ok: {m.HeartbeatStatus}");
 // No `heartbeat.Dead` handler on purpose: a ping response can never say DEAD
 // (it writes last_heartbeat_at = NOW(), then reports on that), so such a
@@ -88,6 +94,75 @@ heartbeat.Start();
 [`samples/`](samples/) holds five runnable console programs covering
 validation, offline license checkout and verification, machine activation
 with heartbeats, offline proofs, and entitlements.
+
+### Activation that can run twice
+
+`ActivateMachineAsync` reports a repeat activation of the same fingerprint as
+`FingerprintTakenException`, because that is what the server returns. If your
+activation step can run more than once — a reinstall, a crash before the machine
+id was persisted, a user clicking the button again — use the idempotent form,
+which adopts the machine that already holds the fingerprint:
+
+```csharp
+MachineActivation activation = await client.ActivateMachineIdempotentAsync(
+    new CreateMachineRequest
+    {
+        Fingerprint = "a-stable-machine-fingerprint",
+        LicenseId = licenseId,
+    });
+
+if (activation.AlreadyActivated)
+{
+    Console.WriteLine($"already activated as {activation.Machine.Id}");
+}
+```
+
+Two things it deliberately will not do. It never deletes an adopted machine, even
+when validation comes back over-limit — that seat belongs to something this call
+did not create. And it never adopts a machine from a *different* license: the
+lookup is scoped to `LicenseId`, so under a policy whose
+`MachineUniquenessStrategy` is `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the
+scopes where a conflict can come from another license — the scoped search finds
+nothing and the original `FingerprintTakenException` surfaces.
+
+That is the correct outcome, not a gap. Returning another license's machine would
+have this client heartbeat and check out a machine its own license does not own
+while its own `machines_count` stayed at zero, and since the machine resource
+carries no `license_id` it could never detect that. Sharing one fingerprint's
+seat across licenses is precisely what the wider uniqueness scopes exist to
+prevent. Nothing is lost either: all three strategies' duplicate checks include
+the caller's own license rows, so a genuine re-activation conflicts — and is
+found — under every one of them. `AlreadyActivated` therefore means "this license
+already has this machine", the strong reading.
+
+### Reads
+
+| Call | Route |
+|---|---|
+| `GetLicenseAsync(id)` | `GET /licenses/{id}` |
+| `GetPolicyAsync(id)` | `GET /policies/{id}` — **403s on a license key** |
+| `GetLicensePolicyAsync(licenseId)` | `GET /licenses/{id}/policy` — use this one |
+| `GetHeartbeatIntervalAsync(licenseId)` | the above, divided by three |
+| `GetMachineAsync(id)` | `GET /machines/{id}` |
+| `UpdateMachineAsync(id, request)` | `PATCH /machines/{id}` |
+| `ListMachinesAsync(...)` | `GET /machines` — **offset**-paginated |
+| `FindMachineByFingerprintAsync(licenseId, fp)` | the above, license-scoped and exact-matched client-side |
+| `ListMachineProcessesAsync(machineId, ...)` | `GET /machines/{id}/processes` — **keyset**-paginated |
+| `DeleteProcessAsync(id)` | `DELETE /processes/{id}` |
+| `CheckForUpgradeAsync(request)` | `GET /releases/actions/upgrade` |
+| `GetHealthAsync()` | `GET /v1/health` |
+
+`ListMachinesAsync` returns an `OffsetPage<T>`, not the `Page<T>` the entitlement
+and component listings use. The two paginate on different mechanisms: the machine
+collection sends `meta.page{number,size,total,totalPages}` built from a real
+count, so you walk it with `HasMore`; the component listing sends no pagination
+metadata at all, so its cursor has to be synthesized from a full page. Reaching
+for a cursor on one or a total on the other is the same mistake in opposite
+directions, and both directions silently drop rows.
+
+`GetMachineAsync` and the machine listing are also the only network calls in this
+SDK whose response is built off a **read**, which is what makes
+`HeartbeatStatus.Dead` reachable from them — see [Known gaps](#known-gaps).
 
 ## Auth transports
 
@@ -328,25 +403,45 @@ around:
   so do this SDK's decoders — neither is surfaced as a distinct C# member,
   because that would imply a restriction the server does not apply.
 - **`Policy.HeartbeatDuration` DOES drive the heartbeat window, and
-  `HeartbeatScheduler` does not adapt to it.** The server uses
+  `HeartbeatScheduler` still does not adapt to it on its own.** The server uses
   `policy.heartbeat_duration` when it is set and falls back to 600 seconds only
   when it is null (`Policy::effective_heartbeat_duration_secs`; the culler
   measures against `COALESCE(p.heartbeat_duration, 600)`). Earlier releases of
   this SDK documented the window as a hardcoded 600s that ignored the policy —
-  that was wrong. But the correction cuts both ways: there is no policy getter
-  here, so `DefaultInterval` is always ~1/3 of the 600s **fallback**. On a
-  policy with a shorter `heartbeat_duration`, that default pings too slowly and
-  the machine lapses to `DEAD` between pings — **pass your own `interval`**.
-  The SDK will not do it for you.
-- **You can obtain the real window without a policy getter.** A checked-out
-  `.machine` file carries a read-backed `NextHeartbeatAt`, so
-  `NextHeartbeatAt - LastHeartbeatAt` recovers the effective window — size your
-  interval from that. Two caveats: `next_heartbeat_at` is
+  that was wrong. `DefaultInterval` is still ~1/3 of the 600s **fallback**, and
+  on a policy with a shorter `heartbeat_duration` it pings too slowly and the
+  machine lapses to `DEAD` between pings. What has changed is that you no longer
+  have to find the right number yourself: `GetHeartbeatIntervalAsync(licenseId)`
+  reads the governing policy and returns the matching interval, and
+  `Policy.EffectiveHeartbeatDurationSeconds` applies the same 600s fallback the
+  server does. **Pass an interval to the constructor** — the scheduler takes the
+  value once and keeps it, so a policy changed later needs a new scheduler. A
+  zero or negative interval falls back to `DefaultInterval` rather than throwing
+  (`policy.heartbeat_duration` has no `CHECK` constraint server-side, so a
+  hand-rolled window/3 can genuinely produce one); `Timeout.InfiniteTimeSpan`
+  still means "never tick", as it always did.
+- **You can also obtain the window without a policy read.** A checked-out
+  `.machine` file, and now `GetMachineAsync`, both carry a read-backed
+  `NextHeartbeatAt`, so `NextHeartbeatAt - LastHeartbeatAt` recovers the
+  effective window. Two caveats: `next_heartbeat_at` is
   `last_heartbeat_at + window`, so it is `null` and the window unrecoverable
-  until the machine has pinged at least once, and the value is a snapshot from
-  the moment the file was issued, so a later policy change is not reflected in a
-  file you already hold. Learning the duration out of band is the fallback for
-  when no machine file is available, not the only option.
+  until the machine has pinged at least once, and a value read out of a
+  `.machine` file is a snapshot from the moment the file was issued, so a later
+  policy change is not reflected in a file you already hold.
+- **Do NOT derive the window from a ping response.** `CreateMachineAsync`,
+  `PingHeartbeatAsync`, `ResetHeartbeatAsync` and `UpdateMachineAsync` return rows
+  from statements that do not join `policies`, so their `NextHeartbeatAt` is
+  computed against the 600s fallback whatever the policy says. Two responses for
+  the same machine seconds apart can disagree, and the endpoint a scheduler
+  naturally calls is the one that is wrong. `GetLicensePolicyAsync` and the
+  read-backed machines above are the trustworthy sources.
+- **"A write-backed response can never say `DEAD`" has one exception:
+  `UpdateMachineAsync`.** The rule holds for the ping, the create and the reset
+  because each of those writes `last_heartbeat_at` (or nulls it) and the status is
+  then derived from the timestamp it just set. `PATCH /machines/{id}` touches no
+  heartbeat column, so the status it reports is judged against a timestamp as old
+  as it ever was, and `DEAD` is reachable from it. The discriminator is *which
+  columns the write touched*, not the HTTP verb.
 - **Whether `Machine.NextHeartbeatAt` reflects the real window depends on the
   route.** The value is derived from a window carried on the row, populated
   only when the loading query joined `policies`. `CreateMachineAsync`,
@@ -372,11 +467,12 @@ around:
   `TamgaNotFoundException`. Hang re-activation off that and nothing else. The
   `Dead` event is kept (a machine-read method would make it live) but no
   heartbeat route can currently raise it.
-- **A response built off a *read* can report `DEAD` — and one already reaches
-  you.** `CheckOutMachineAsync` yields a `.machine` file whose embedded machine
-  is resolved server-side through a read query;
-  `MachineFile.VerifyAndDecrypt` returns a `Machine` whose `HeartbeatStatus` is
-  bound from that payload. Even there it means only that the last ping is older
+- **A response built off a *read* can report `DEAD` — and three now reach you.**
+  `CheckOutMachineAsync` yields a `.machine` file whose embedded machine is
+  resolved server-side through a read query; `MachineFile.VerifyAndDecrypt`
+  returns a `Machine` whose `HeartbeatStatus` is bound from that payload. So do
+  `GetMachineAsync` and `ListMachinesAsync`, whose query joins `policies`. Even
+  there it means only that the last ping is older
   than the window: the cull job early-returns unless `policy.require_heartbeat`
   is set, and that column defaults to `false`, so on a default policy **nothing
   is ever culled** and a machine can sit at `DEAD` indefinitely with its row and
@@ -397,20 +493,79 @@ around:
 - **`Policy.MaxMemory` and `Policy.MaxDisk` are absent from `GET` responses**
   even though both are enforced during validation, so they cannot be
   introspected client-side — only observed as `TooMuchMemory`/`TooMuchDisk`
-  on a failed validation.
+  on a failed validation. Every one of the other 30 policy attributes the
+  serializer emits is now modelled; 14 of them were silently missing before.
+- **`GetPolicyAsync` always `403`s on a license key; `GetLicensePolicyAsync` does
+  not.** `GET /policies/{id}` is gated on the `policy.read` permission, which is
+  not in the `LicenseToken` role's set — no policy setting turns it on.
+  `GET /licenses/{id}/policy` returns the identical resource and is gated on
+  `license.read`, which a license key does hold. Embedded clients want that one;
+  `GetPolicyAsync` is for admin / developer / product-token / environment-token
+  credentials, or when you hold a policy id and no license id.
+- **The read routes are not scoped to the caller's own license, and neither are
+  the machine writes.** `GET /licenses/{id}`, `GET /policies/{id}` and
+  `GET /licenses/{id}/policy` check a permission plus the account on the verified
+  credential, but not — unlike validate and check-out — that the id being read is
+  the credential's own. A client holding one license key can therefore read every
+  license in the account including each one's plaintext `key`. The same omission
+  covers machines: `LicenseToken` holds `machine.read`, `machine.update` and
+  `machine.delete`, and no machine route applies the per-license scope check, so a
+  license key can `PATCH` or `DELETE` any machine in the account. This SDK cannot
+  fix any of that; it is reported upstream. Do not expose these routes to an
+  untrusted client, and do not build a UI that assumes a license key can only
+  reach its own rows.
+- **`policy.check_in_interval` is stored in the adverbial form**
+  (`daily`/`weekly`/`monthly`/`yearly`), not the noun form this SDK's
+  documentation previously claimed. The decoder accepts both, and an unknown
+  value falls back to the shortest interval so a policy it cannot read is
+  over-served rather than under-served. Read it together with
+  `Policy.CheckInIntervalCount` — the period is `count × unit`.
+- **There is no exact-match fingerprint filter on the machine collection.** The
+  only fingerprint-aware query parameter is `filter[q]`, a case-insensitive
+  substring search that also covers `name` and `hostname`.
+  `FindMachineByFingerprintAsync` narrows with `filter[license]` plus the
+  fingerprint as a search term and then re-checks equality client-side; anything
+  that trusted the server's result set directly could return a machine whose
+  hostname merely contained the fingerprint.
+- **The unfiltered machine listing is account-wide, not license-scoped**, because
+  no machine route applies the per-license scope check and `LicenseToken` holds
+  `machine.read`. Pass `licenseId` to `ListMachinesAsync` whenever the answer is
+  meant to be about one license — the server will not narrow it for you, and the
+  machine resource carries no `license_id` to narrow it afterwards. This is why
+  `FindMachineByFingerprintAsync` requires a license id rather than offering an
+  account-wide convenience overload.
+- **Nothing on the server deletes process rows.** The process reaper is not
+  wired up, so a process row outlives the process it represents until a client
+  removes it — and those rows count against `policy.max_processes`. Call
+  `DeleteProcessAsync`, or set `ProcessHeartbeatScheduler.DeleteOnDispose`.
+  Machines are different: they do get culled, but only when
+  `policy.require_heartbeat` is set, which is not the default.
 - **Checkout `includes` is always empty**, and each checkout mints a fresh
   certificate: the call is not idempotent.
 - **`X-RateLimit-*` response headers are not parsed**, because the server
   never actually sets them.
-- **Auto-update and release-checking are not implemented here** — but the
-  server-side endpoint does work, contrary to what earlier versions of this
-  section claimed. `GET /v1/accounts/{id}/releases/actions/upgrade` is a live,
-  public handler: it answers `204 No Content` when the caller is already
-  current, and a `releases` resource otherwise. Omitting `constraint` defaults
-  to patch-only (`~x.y.z`); omitting `channel` matches **every** channel,
-  including `alpha` and `dev`. An artifact-download route exists too, though it
-  is currently behind a permission that no role holds. None of this is exposed
-  by this SDK yet — it is a missing feature, not a blocked one.
+- **`GetHealthAsync` is a differential diagnostic, not just a ping.**
+  `GET /v1/health` is exempt from two gates every other request passes: it is on
+  the server's public-route list, so it needs no credential, and it skips the
+  `Host`-header check. So if every ordinary call is failing with `403` and *"The
+  Host header does not match any configured host"* while this one succeeds, the
+  problem is the deployment's allowed-hosts configuration — not your token, not
+  your account id, and not anything re-issuing credentials will fix. Note it is a
+  liveness probe: the handler never touches the database, so a healthy answer
+  does not promise licensing calls will work. Its body is a plain
+  `{status, version, uptime_secs}` object, not a JSON:API document.
+- **The machine `group` and `owner` sub-resources are not exposed.** Both need
+  `groups` and `users` resource models that a licensing client has no use for.
+  `/machines/{id}/components` and `/machines/{id}/processes` are both exposed.
+- **Component and process REQUEST bodies are flat; their RESPONSES are not.**
+  `POST /components` and `POST /processes` take `{machine_id, fingerprint, name,
+  metadata}` at the root, unlike the enveloped `POST /machines` — that asymmetry
+  is real and deliberate. It is request-only: every response on these routes is
+  an ordinary JSON:API `{type, id, attributes}` document. Releases up to and
+  including 2.0.x decoded those responses flat, so `CreateComponentAsync`,
+  `CreateProcessAsync` and `PingProcessAsync` returned objects with empty ids and
+  empty strings, and `ListComponentsAsync` returned the right number of blank
+  components. Fixed; if you were working around it by re-fetching, you can stop.
 
 ## Documentation
 

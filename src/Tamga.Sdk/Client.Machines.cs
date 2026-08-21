@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tamga.Sdk.Models;
 
 namespace Tamga.Sdk;
@@ -164,6 +165,371 @@ public sealed partial class TamgaClient
         return Machine.FromResource(doc.Data ?? throw MissingDataError());
     }
 
+    // ---------------------------------------------------------------
+    // §G.2 Machine reads
+    //
+    // GetMachineAsync and ListMachinesAsync are the SDK's only network routes whose query LEFT
+    // JOINs `policies`, so they are the only ones whose `HeartbeatStatus` and `NextHeartbeatAt`
+    // are computed against the policy's real window rather than the 600s fallback.
+    //
+    // Note that this is NOT the same axis as write-vs-read, and the two must not be collapsed.
+    // Write-vs-read answers "can this response say DEAD?" — a response the server builds off a
+    // write that touched `last_heartbeat_at` cannot, because the status is derived from the
+    // timestamp that write just set. Joined-vs-unjoined answers "is next_heartbeat_at policy-
+    // accurate?". UpdateMachineAsync is the case that separates them: it is a write, but it never
+    // touches `last_heartbeat_at`, so its response CAN report DEAD — and its UPDATE … RETURNING
+    // does not join `policies`, so its next_heartbeat_at is on the fallback side anyway.
+    // ---------------------------------------------------------------
+
+    /// <summary><c>GET /machines/{id}</c> — reads a machine resource.</summary>
+    /// <param name="machineId">The machine to read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// Unlike <see cref="PingHeartbeatAsync"/>, this is a genuine staleness verdict: nothing here
+    /// wrote <c>last_heartbeat_at</c> first, so <see cref="Machine.HeartbeatStatus"/> can come back
+    /// <see cref="HeartbeatStatus.Dead"/> and <see cref="Machine.NextHeartbeatAt"/> is derived from
+    /// the policy's window. <c>NextHeartbeatAt - LastHeartbeatAt</c> on this result therefore
+    /// recovers the effective window, the same way a checked-out <c>.machine</c> file does — null
+    /// until the machine has pinged at least once.
+    /// </para>
+    /// <para>
+    /// <see cref="HeartbeatStatus.Dead"/> here still does not mean the row was culled or its seat
+    /// released: culling is gated on <c>policy.require_heartbeat</c>, which defaults to
+    /// <see langword="false"/>. A <c>404</c> is the only proof the row is gone.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
+    public async Task<Machine> GetMachineAsync(Guid machineId, CancellationToken cancellationToken = default)
+    {
+        var doc = await _transport.SendJsonApiAsync<MachineAttributes>(
+            HttpMethod.Get, $"/machines/{machineId}", cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Machine.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary><c>PATCH /machines/{id}</c> — updates a machine's mutable attributes.</summary>
+    /// <param name="machineId">The machine to update.</param>
+    /// <param name="request">The attributes to change; omitted ones are left untouched.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// Enveloped like <see cref="CreateMachineAsync"/> (<c>{"data":{"type":"machines","attributes":{…}}}</c>),
+    /// unlike the flat component/process creates. A field cannot be set back to null through this
+    /// route — see <see cref="UpdateMachineRequest"/>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>This is a write whose response can still report <see cref="HeartbeatStatus.Dead"/>.</b>
+    /// The rule that a write-backed response never says <c>DEAD</c> holds because the write set
+    /// <c>last_heartbeat_at</c> and the status is then derived from it — and this update touches no
+    /// heartbeat column at all, so the status is judged against a timestamp that is as old as it
+    /// ever was. Do not treat "it was a <c>PATCH</c>" as a reason the status must be live.
+    /// </para>
+    /// <para>
+    /// <see cref="Machine.NextHeartbeatAt"/> on this response is nevertheless the UNTRUSTWORTHY
+    /// kind: the <c>UPDATE … RETURNING</c> does not join <c>policies</c>, so it is computed against
+    /// the 600s fallback. Do not size a heartbeat interval from it — use
+    /// <see cref="GetLicensePolicyAsync"/> or a read-backed machine.
+    /// </para>
+    /// <para>
+    /// ⚠ This route is permission-gated (<c>machine.update</c>) and <b>not</b> scoped to the
+    /// caller's own license — a license key holds <c>machine.update</c> and <c>machine.delete</c>,
+    /// and no machine route applies the per-license scope check. So a credential can modify or
+    /// delete any machine in the account, not only its own. Do not build a UI on the assumption
+    /// that it can only reach its own row.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
+    public async Task<Machine> UpdateMachineAsync(Guid machineId, UpdateMachineRequest request, CancellationToken cancellationToken = default)
+    {
+        var body = new JsonApiCreateRequest<MachineAttributes>
+        {
+            Data = new JsonApiCreateRequestData<MachineAttributes>
+            {
+                Type = "machines",
+                Attributes = new MachineAttributes
+                {
+                    Name = request.Name,
+                    Ip = request.Ip,
+                    Hostname = request.Hostname,
+                    Platform = request.Platform,
+                    Cores = request.Cores,
+                    Memory = request.Memory,
+                    Disk = request.Disk,
+                    Metadata = request.Metadata,
+                },
+            },
+        };
+
+        var doc = await _transport.SendJsonApiAsync<MachineAttributes>(
+            HttpMethod.Patch, $"/machines/{machineId}", jsonBody: body, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Machine.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary>The server's maximum (and this SDK's default) page size for the machine collection — <c>page[size]</c> is clamped to <c>1..100</c> server-side.</summary>
+    private const int MaxMachinesPageSize = 100;
+
+    /// <summary>
+    /// <c>GET /machines</c> — lists the account's machines, OFFSET-paginated.
+    /// </summary>
+    /// <param name="pageNumber">1-based page number. Defaults to <c>1</c>.</param>
+    /// <param name="pageSize">Rows per page, <c>1..100</c>. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25. Values above 100 are clamped to match the server's own clamp.</param>
+    /// <param name="search">
+    /// Free-text search, sent as <c>filter[q]</c>. A case-insensitive SUBSTRING match run across
+    /// <c>name</c>, <c>hostname</c> AND <c>fingerprint</c> — not an exact-match filter on any one
+    /// of them. See <see cref="FindMachineByFingerprintAsync"/>.
+    /// </param>
+    /// <param name="licenseId">
+    /// Restrict the listing to machines on one license, sent as <c>filter[license]</c>. Omitting it
+    /// lists every machine in the account, which a license credential is permitted to do — see the
+    /// remarks.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>This listing is OFFSET-paginated, not keyset.</b> It returns
+    /// <c>meta.page{number,size,total,totalPages}</c> — an exact count from the same filter that
+    /// selected the rows — so it yields an <see cref="OffsetPage{T}"/> and there is no cursor to
+    /// thread. Do not reach for <see cref="Page{T}"/>'s <c>NextCursor</c> pattern here, and do not
+    /// synthesize one: the entitlement and component listings work the other way round and
+    /// confusing the two drops rows in whichever direction the mistake was made. Walk pages while
+    /// <see cref="OffsetPage{T}.HasMore"/>.
+    /// </para>
+    /// <para>
+    /// The server refuses an offset past 100 000 rows with <c>400 PAGE_OUT_OF_RANGE</c>, which at
+    /// the maximum page size is page 1001.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The unfiltered listing is account-wide, not license-scoped.</b> No machine route
+    /// applies the per-license scope check that validate and check-out apply, and the
+    /// <c>LicenseToken</c> role holds <c>machine.read</c>, so a client authenticated with one
+    /// license key sees every machine in the account. Pass <paramref name="licenseId"/> whenever
+    /// the answer is supposed to be about one license — the server will not narrow it for you, and
+    /// the machine resource carries no <c>license_id</c> to narrow it afterwards.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="pageNumber"/> or <paramref name="pageSize"/> is less than 1.</exception>
+    public async Task<OffsetPage<Machine>> ListMachinesAsync(
+        int? pageNumber = null,
+        int? pageSize = null,
+        string? search = null,
+        Guid? licenseId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (pageNumber is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(pageNumber), pageNumber, "Page numbers are 1-based; pass null for the first page.");
+        }
+
+        if (pageSize is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(pageSize), pageSize, "Page size must be at least 1; pass null for the default of 100.");
+        }
+
+        var effectiveNumber = pageNumber ?? 1;
+        var effectiveSize = Math.Min(pageSize ?? MaxMachinesPageSize, MaxMachinesPageSize);
+
+        var parts = new List<string>
+        {
+            $"page%5Bnumber%5D={effectiveNumber}",
+            $"page%5Bsize%5D={effectiveSize}",
+        };
+        if (!string.IsNullOrEmpty(search))
+        {
+            parts.Add($"filter%5Bq%5D={Uri.EscapeDataString(search)}");
+        }
+
+        if (licenseId is { } license)
+        {
+            parts.Add($"filter%5Blicense%5D={license}");
+        }
+
+        var doc = await _transport.SendJsonApiListAsync<MachineAttributes>(
+            HttpMethod.Get, "/machines", query: string.Join('&', parts), cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var items = doc.Data.Select(Machine.FromResource).ToList();
+        var page = doc.Meta?.Deserialize<JsonApiListMeta>(TamgaJsonOptions.Default)?.Page;
+
+        return new OffsetPage<Machine>
+        {
+            Items = items,
+            // Fall back to what was asked for rather than to zero: a missing `meta.page` would
+            // otherwise report TotalPages = 0, which makes HasMore false and silently ends a walk
+            // on its first page.
+            Number = page?.Number ?? effectiveNumber,
+            Size = page?.Size ?? effectiveSize,
+            Total = page?.Total ?? items.Count,
+            TotalPages = page?.TotalPages ?? (items.Count == 0 ? 0 : effectiveNumber),
+        };
+    }
+
+    /// <summary>
+    /// Finds the machine on <paramref name="licenseId"/> holding an exact fingerprint, or
+    /// <see langword="null"/> if that license has none.
+    /// </summary>
+    /// <param name="licenseId">The license to search within. Required — see the remarks.</param>
+    /// <param name="fingerprint">The exact fingerprint to look for.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>The license scope is not a convenience filter; it is the safety property.</b> The
+    /// account-wide answer to "who holds this fingerprint" is a different and more dangerous
+    /// question, because the machine resource carries no <c>license_id</c> — so a caller handed a
+    /// machine from another license has no way to notice. It would then heartbeat and check out a
+    /// machine its own license does not own, while its own <c>machines_count</c> stayed at zero.
+    /// Seat-sharing across licenses is precisely what the server's wider uniqueness scopes exist to
+    /// prevent (<c>machines/service.rs:47-50</c>), so an SDK must not quietly reconstruct it.
+    /// </para>
+    /// <para>
+    /// Scoping loses nothing, because all three uniqueness strategies' duplicate checks include the
+    /// caller's own license rows: <c>UNIQUE_PER_LICENSE</c> matches on
+    /// <c>license_id = the caller's</c>, <c>UNIQUE_PER_POLICY</c> joins licenses on the policy the
+    /// caller's license shares, and <c>UNIQUE_PER_ACCOUNT</c> covers everything. A genuine
+    /// re-activation of a machine this license already owns therefore produces
+    /// <c>FINGERPRINT_TAKEN</c> under all three, and a license-scoped search finds it every time.
+    /// The only thing an account-wide search would add is the cross-license case — the one the
+    /// server is deliberately refusing.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>There is no exact-match fingerprint filter on the machine collection.</b> The only
+    /// fingerprint-aware query parameter is <c>filter[q]</c>, a case-insensitive substring search
+    /// that also matches <c>name</c> and <c>hostname</c>. So this narrows with
+    /// <c>filter[license]</c> plus the fingerprint as a search term, then re-checks
+    /// <see cref="Machine.Fingerprint"/> for exact equality client-side, walking pages until it
+    /// finds a match or runs out. Anything that trusted the search result directly could return a
+    /// machine whose <em>hostname</em> merely contained the fingerprint. The narrowing and the
+    /// scoping are independent: both err toward a superset, and the client-side equality check is
+    /// what makes the result exact.
+    /// </para>
+    /// <para>
+    /// The comparison is ordinal and case-sensitive, matching how the server stores and uniqueness-
+    /// checks the column.
+    /// </para>
+    /// </remarks>
+    public async Task<Machine?> FindMachineByFingerprintAsync(Guid licenseId, string fingerprint, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(fingerprint))
+        {
+            return null;
+        }
+
+        var pageNumber = 1;
+        while (true)
+        {
+            var page = await ListMachinesAsync(pageNumber, MaxMachinesPageSize, fingerprint, licenseId, cancellationToken).ConfigureAwait(false);
+            var match = page.Items.FirstOrDefault(m => string.Equals(m.Fingerprint, fingerprint, StringComparison.Ordinal));
+            if (match is not null)
+            {
+                return match;
+            }
+
+            if (!page.HasMore)
+            {
+                return null;
+            }
+
+            pageNumber++;
+        }
+    }
+
+    /// <summary>
+    /// Activation that treats <c>409 FINGERPRINT_TAKEN</c> as "already activated" instead of a
+    /// dead end: creates the machine, or adopts the existing one holding that fingerprint, then
+    /// validates the license either way.
+    /// </summary>
+    /// <param name="request">The machine to activate.</param>
+    /// <param name="deleteOnOverLimit">Whether to roll back an over-limit activation. Applies ONLY to a machine this call created — see the remarks.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// The server reports a re-activation of the same fingerprint as a conflict on purpose, and
+    /// <see cref="CreateMachineAsync"/> and <see cref="ActivateMachineAsync"/> both surface that
+    /// raw. For an application whose activation step can run twice — a reinstall, a crash before
+    /// the machine id was persisted, a user clicking "activate" again — that leaves no way forward
+    /// except catching the exception and guessing. This method is the way forward: it looks the
+    /// fingerprint up (see <see cref="FindMachineByFingerprintAsync"/>) and carries on with the row
+    /// that already exists, reporting it as <see cref="MachineActivation.AlreadyActivated"/>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>An adopted machine is never rolled back.</b> When the fingerprint was already taken,
+    /// <paramref name="deleteOnOverLimit"/> is ignored even on an over-limit verdict: deleting a row
+    /// this call did not create would destroy a seat — possibly another install's, possibly another
+    /// license's — on the strength of a limit that machine did not cause. The over-limit code still
+    /// reaches you in <see cref="MachineActivation.Validation"/>; what to do about a seat you did
+    /// not take is the caller's decision, not this method's.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>A cross-license conflict is re-thrown, not adopted.</b> The lookup is scoped to
+    /// <see cref="CreateMachineRequest.LicenseId"/>, so under a policy whose
+    /// <see cref="Policy.MachineUniquenessStrategy"/> is <c>UNIQUE_PER_POLICY</c> or
+    /// <c>UNIQUE_PER_ACCOUNT</c> — where the conflict can come from a machine on a
+    /// <em>different</em> license — no match is found and the original
+    /// <see cref="FingerprintTakenException"/> surfaces. That is the correct outcome, not a gap:
+    /// returning another license's machine would have this client heartbeat and check out a machine
+    /// its own license does not own while its own <c>machines_count</c> stayed at zero, and since
+    /// the resource carries no license id it could never detect that. Sharing one fingerprint's
+    /// seat across licenses is exactly what the wider uniqueness scopes exist to prevent.
+    /// </para>
+    /// <para>
+    /// Scoping costs nothing for the case this method is for. All three uniqueness strategies'
+    /// duplicate checks include the caller's own license rows, so a genuine re-activation of a
+    /// machine this license already owns conflicts under every strategy and is found by the scoped
+    /// search every time. <see cref="MachineActivation.AlreadyActivated"/> therefore means "this
+    /// license already has this machine" — the strong reading, not a hedge.
+    /// </para>
+    /// <para>
+    /// A create-time limit rejection (<c>422</c>) still propagates as a
+    /// <see cref="TamgaLimitExceededException"/>: no row was written, so there is nothing to adopt
+    /// and nothing to roll back.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="FingerprintTakenException">The create conflicted and no machine on <see cref="CreateMachineRequest.LicenseId"/> holds that exact fingerprint — so the conflict came from another license, and adopting its machine would be a seat-sharing bug rather than a re-activation. The server's original error is preserved.</exception>
+    /// <exception cref="TamgaLimitExceededException">The server refused the create itself.</exception>
+    public async Task<MachineActivation> ActivateMachineIdempotentAsync(
+        CreateMachineRequest request,
+        bool deleteOnOverLimit = true,
+        CancellationToken cancellationToken = default)
+    {
+        Machine machine;
+        var alreadyActivated = false;
+
+        try
+        {
+            machine = await CreateMachineAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (FingerprintTakenException)
+        {
+            var existing = await FindMachineByFingerprintAsync(request.LicenseId, request.Fingerprint, cancellationToken).ConfigureAwait(false);
+            if (existing is null)
+            {
+                // The conflict is real, but this license does not hold that fingerprint — so it
+                // came from another license under a wider uniqueness scope. Adopting that machine
+                // would share a seat across licenses, which is the thing those scopes exist to
+                // stop. Rethrowing keeps the server's own code and detail rather than inventing a
+                // second story about it.
+                throw;
+            }
+
+            machine = existing;
+            alreadyActivated = true;
+        }
+
+        var validation = await ValidateByIdAsync(request.LicenseId, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (deleteOnOverLimit && !alreadyActivated && IsOverLimitCode(validation.Code))
+        {
+            await DeleteMachineAsync(machine.Id, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new MachineActivation
+        {
+            Machine = machine,
+            Validation = validation,
+            AlreadyActivated = alreadyActivated,
+        };
+    }
+
     private static TamgaApiException MissingDataError() =>
         new(new TamgaApiError { Status = 200, Code = "MISSING_DATA", Detail = "Response had no resource." });
 }
@@ -271,6 +637,81 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// </remarks>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(ServerHeartbeatWindowSeconds / 3.0);
 
+    /// <summary>
+    /// The shortest interval this SDK will ever ping at. Anything below it — passed to a scheduler
+    /// constructor, or derived from a very short window by <see cref="IntervalForWindow"/> — is
+    /// raised to this value. See <see cref="IntervalForWindow"/> for why the guard is a floor
+    /// rather than a non-positive check, and for the arithmetic showing what it costs.
+    /// </summary>
+    /// <remarks>
+    /// A <see langword="null"/>, zero or negative value means "unspecified" rather than "too
+    /// fast", and still falls back to <see cref="DefaultInterval"/> rather than to this floor —
+    /// the same split tamga-java draws.
+    /// </remarks>
+    internal static readonly TimeSpan MinimumInterval = TimeSpan.FromSeconds(1);
+
+    /// <summary>Raises <paramref name="interval"/> to <see cref="MinimumInterval"/> if it falls short.</summary>
+    /// <remarks>
+    /// <see langword="internal"/> so <see cref="ProcessHeartbeatScheduler"/> shares this one floor
+    /// instead of declaring a second that could drift from it.
+    /// </remarks>
+    internal static TimeSpan AtLeastMinimum(TimeSpan interval) =>
+        interval < MinimumInterval ? MinimumInterval : interval;
+
+    /// <summary>
+    /// The ping interval for a given heartbeat window — the window divided by three, the same ratio
+    /// <see cref="DefaultInterval"/> uses against the 600s fallback.
+    /// </summary>
+    /// <param name="window">The effective heartbeat window, e.g. <see cref="Policy.EffectiveHeartbeatWindow"/>.</param>
+    /// <returns>An interval comfortably inside <paramref name="window"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// Three ticks per window means two pings can be lost — to a 429 that outlived its retry
+    /// budget, a network blip, a suspended process — before the machine falls outside the window
+    /// server-side. One tick per window would leave no margin at all; the machine would lapse to
+    /// <c>DEAD</c> on the first missed ping, and (on a policy that sets <c>require_heartbeat</c>)
+    /// eventually be culled, without the client being able to see it happen.
+    /// </para>
+    /// <para>
+    /// A non-positive <paramref name="window"/> yields <see cref="DefaultInterval"/> rather than a
+    /// zero or negative interval, which <see cref="PeriodicTimer"/> would reject.
+    /// </para>
+    /// <para>
+    /// The result is floored at one second, so a very short window cannot become a very fast ping
+    /// loop. The guard has to be a floor and not merely a non-positive check, because
+    /// <see cref="PeriodicTimer"/> rejects zero and negatives but honours a 1ms period
+    /// <em>exactly</em> — measured on net8.0 at ~765 ticks per second. A rule that clamps only
+    /// what the runtime silently converts would therefore clamp <c>0</c> and pass <c>1ms</c>
+    /// through, giving opposite treatment to two inputs with the same observable behaviour: that
+    /// is a property of the runtime's provenance, not of safety. Only a floor bounds the request
+    /// rate. The range is reachable by ordinary mistake, since this parameter is a
+    /// <see cref="TimeSpan"/> while the policy field behind it is <c>heartbeat_duration</c> in
+    /// <em>seconds</em> (see <see cref="Policy.EffectiveHeartbeatWindow"/>), so anyone converting
+    /// units by hand lands in it.
+    /// </para>
+    /// <para>
+    /// The floor costs exactly one thing — the divisor's promise that two consecutive pings may be
+    /// lost — and it degrades gracefully rather than breaking, because the server truncates.
+    /// <c>heartbeat_status_within</c> judges <c>age_secs &lt;= window_secs</c> on a
+    /// <c>num_seconds()</c> value, and <c>num_seconds()</c> truncates
+    /// (<c>Duration::milliseconds(1999).num_seconds() == 1</c>), so a machine first reads
+    /// <c>DEAD</c> at an age of <c>window_secs + 1</c> seconds. Every window therefore carries one
+    /// free second. Window 3 is where floor and divisor first agree (interval 1s, <c>DEAD</c> at
+    /// 4s, 2 losses tolerated); window 2 tolerates 1; window 1 tolerates 0; and window 0 is the
+    /// only value the floor cannot hold. Window 0 is deliberately not served: it would need a
+    /// ~333ms ping, tying this SDK's request rate to <c>num_seconds()</c> truncation — a server
+    /// implementation artifact, not a protocol guarantee — for one nonsensical value.
+    /// </para>
+    /// <para>
+    /// Pair with <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>,
+    /// which fetches the governing policy and applies this in one call.
+    /// </para>
+    /// </remarks>
+    public static TimeSpan IntervalForWindow(TimeSpan window) =>
+        window > TimeSpan.Zero
+            ? AtLeastMinimum(TimeSpan.FromSeconds(window.TotalSeconds / 3.0))
+            : DefaultInterval;
+
     private readonly TamgaClient _client;
     private readonly Guid _machineId;
     private readonly PeriodicTimer _timer;
@@ -315,12 +756,62 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="machineId">The ID of the machine to ping.</param>
-    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
+    /// <param name="interval">
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, falls back to it
+    /// when non-positive, and is raised to one second when positive but shorter.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// A zero or negative <paramref name="interval"/> falls back to <see cref="DefaultInterval"/>
+    /// rather than throwing — the same rule <see cref="IntervalForWindow"/> applies, and the same
+    /// rule tamga-go, tamga-java and tamga-swift apply in their own scheduler constructors. It is
+    /// reachable: <c>policy.heartbeat_duration</c> has no <c>CHECK</c> constraint server-side and
+    /// <c>effective_heartbeat_duration_secs</c> returns <c>0</c> or a negative verbatim (only
+    /// <see langword="null"/> falls back to <see cref="ServerHeartbeatWindowSeconds"/>), so a
+    /// caller who sizes an interval from a policy by hand — rather than through
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>, which routes
+    /// through <see cref="IntervalForWindow"/> and is already guarded — can arrive here with one.
+    /// Without this it reached <see cref="PeriodicTimer"/> and threw
+    /// <see cref="ArgumentOutOfRangeException"/> from inside it.
+    /// </para>
+    /// <para>
+    /// <see cref="Timeout.InfiniteTimeSpan"/> (-1ms) is the one exception and is passed through
+    /// unchanged: <see cref="PeriodicTimer"/> accepts it on net8.0 as "never tick", so it already
+    /// worked, and clamping it would silently repurpose a deliberate sentinel. Every other
+    /// non-positive value threw before this and falls back now.
+    /// </para>
+    /// <para>
+    /// A positive <paramref name="interval"/> shorter than one second is raised to one second. The
+    /// timer would have accepted it — <see cref="PeriodicTimer"/> honours a 1ms period exactly, at
+    /// ~765 ticks per second measured on net8.0 — and that is precisely why the guard cannot stop
+    /// at "whatever the runtime refuses": refusing zero avoids a throw, but only a floor bounds the
+    /// request rate. See <see cref="IntervalForWindow"/> for the truncation arithmetic showing the
+    /// floor costs nothing a caller can reach through a policy, and which single window value
+    /// (<c>0</c>) it declines to serve.
+    /// </para>
+    /// </remarks>
     public HeartbeatScheduler(TamgaClient client, Guid machineId, TimeSpan? interval = null)
     {
         _client = client;
         _machineId = machineId;
-        _timer = new PeriodicTimer(interval ?? DefaultInterval);
+        _timer = new PeriodicTimer(TickPeriod(interval));
+    }
+
+    /// <summary>
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <see cref="Timeout.InfiniteTimeSpan"/>
+    /// untouched, <see cref="DefaultInterval"/> for a non-positive <paramref name="interval"/>, and
+    /// otherwise <paramref name="interval"/> raised to <see cref="MinimumInterval"/>. Every value
+    /// this returns is either the sentinel or at least one second. See the constructor's remarks.
+    /// </summary>
+    private static TimeSpan TickPeriod(TimeSpan? interval)
+    {
+        var period = interval ?? DefaultInterval;
+        if (period == Timeout.InfiniteTimeSpan)
+        {
+            return period;
+        }
+
+        return period > TimeSpan.Zero ? AtLeastMinimum(period) : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Idempotent-unsafe: call once per instance.</summary>
