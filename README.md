@@ -147,6 +147,7 @@ already has this machine", the strong reading.
 | `UpdateMachineAsync(id, request)` | `PATCH /machines/{id}` |
 | `ListMachinesAsync(...)` | `GET /machines` — **offset**-paginated |
 | `FindMachineByFingerprintAsync(licenseId, fp)` | the above, license-scoped and exact-matched client-side |
+| `ListMachineProcessesAsync(machineId, ...)` | `GET /machines/{id}/processes` — **keyset**-paginated |
 | `DeleteProcessAsync(id)` | `DELETE /processes/{id}` |
 | `CheckForUpgradeAsync(request)` | `GET /releases/actions/upgrade` |
 | `GetHealthAsync()` | `GET /v1/health` |
@@ -549,32 +550,18 @@ around:
   liveness probe: the handler never touches the database, so a healthy answer
   does not promise licensing calls will work. Its body is a plain
   `{status, version, uptime_secs}` object, not a JSON:API document.
-- **The machine sub-resources are not exposed yet**:
-  `/machines/{id}/processes`, `/machines/{id}/group` and `/machines/{id}/owner`.
-  The processes listing is blocked on a separate defect — `POST /components`,
-  `GET /machines/{id}/components`, `POST /processes` and
-  `POST /processes/{id}/actions/ping` all return **JSON:API-enveloped**
-  `{type, id, attributes}` resources, and this SDK decodes all four as flat
-  objects, so every `Component` and `Process` it returns comes back with default
-  values. Adding a process listing on top of that would either inherit the bug or
-  contradict its neighbours. Both land together in a follow-up. `group`/`owner`
-  need `groups` and `users` resource models that no licensing client currently
-  has a use for.
-- **`CheckForUpgradeAsync` returning nothing does not mean you are up to date.**
-  The server answers `204 No Content` in two situations and deliberately makes
-  them indistinguishable: there is no newer release matching your product,
-  platform, filetype, channel and constraint — **or** there is one, and your
-  license is expired under a policy that stops delivering builds published after
-  expiry, so you may not have it. Answering `403` for the second case would leak
-  the existence of a build, so both get `204`. The property is therefore called
-  `UpgradeOffered`, and the only phrasing the response supports is *"no update is
-  available to you"*, never *"you are on the latest version"*. There is no
-  client-side way to tell the two apart and there is not meant to be one. A
-  **suspended** license is the nearby case that is not silent — it answers `403`.
-  Omitting `constraint` defaults to patch-only (`~x.y.z`); omitting `channel`
-  matches **every** channel, including `alpha` and `dev`. A release-artifact
-  download route exists server-side but sits behind a permission no role holds,
-  so it would `403` for every caller and is not exposed here.
+- **The machine `group` and `owner` sub-resources are not exposed.** Both need
+  `groups` and `users` resource models that a licensing client has no use for.
+  `/machines/{id}/components` and `/machines/{id}/processes` are both exposed.
+- **Component and process REQUEST bodies are flat; their RESPONSES are not.**
+  `POST /components` and `POST /processes` take `{machine_id, fingerprint, name,
+  metadata}` at the root, unlike the enveloped `POST /machines` — that asymmetry
+  is real and deliberate. It is request-only: every response on these routes is
+  an ordinary JSON:API `{type, id, attributes}` document. Releases up to and
+  including 2.0.x decoded those responses flat, so `CreateComponentAsync`,
+  `CreateProcessAsync` and `PingProcessAsync` returned objects with empty ids and
+  empty strings, and `ListComponentsAsync` returned the right number of blank
+  components. Fixed; if you were working around it by re-fetching, you can stop.
 
 ## Documentation
 

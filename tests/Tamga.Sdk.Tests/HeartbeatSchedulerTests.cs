@@ -264,9 +264,27 @@ public class HeartbeatSchedulerTests
     {
         var (client, handler) = MakeClient();
         var processId = Guid.NewGuid();
-        string ResourceJson() => $$"""{"id":"{{processId}}","machine_id":"{{Guid.NewGuid()}}","pid":"123"}""";
-        handler.Enqueue(HttpStatusCode.OK, ResourceJson(), contentType: "application/json");
-        handler.Enqueue(HttpStatusCode.OK, ResourceJson(), contentType: "application/json");
+        // JSON:API-enveloped, per processes/serializer.rs — the ping response is a {type, id,
+        // attributes} document, not the flat object the REQUEST bodies on these routes use.
+        string ResourceJson() => new JsonObject
+        {
+            ["data"] = new JsonObject
+            {
+                ["type"] = "processes",
+                ["id"] = processId.ToString(),
+                ["attributes"] = new JsonObject
+                {
+                    ["pid"] = "123",
+                    ["machine_id"] = Guid.NewGuid().ToString(),
+                    ["last_heartbeat_at"] = "2026-01-02T03:04:05Z",
+                    ["metadata"] = new JsonObject(),
+                    ["created"] = "2026-01-02T03:04:05Z",
+                    ["updated"] = "2026-01-02T03:04:05Z",
+                },
+            },
+        }.ToJsonString();
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
+        handler.Enqueue(HttpStatusCode.OK, ResourceJson());
 
         var pingedCount = 0;
         var secondPing = new TaskCompletionSource();
