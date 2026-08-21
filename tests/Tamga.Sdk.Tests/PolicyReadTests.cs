@@ -438,12 +438,18 @@ public class PolicyReadTests
 
     /// <summary>
     /// No serializer in the API emits a <c>relationships</c> object, and the licence resource has
-    /// no <c>policy_id</c> attribute either — so a read cannot populate the four obsolete id
-    /// properties, and <c>GET /licenses/{id}/policy</c> is the only route from a licence to its
-    /// policy.
+    /// no <c>policy_id</c> attribute either — so a read carries nothing that links a licence to its
+    /// policy, and <c>GET /licenses/{id}/policy</c> is the only route between them.
     /// </summary>
+    /// <remarks>
+    /// Four properties used to claim otherwise (<c>ProductId</c>/<c>PolicyId</c>/<c>UserId</c>/
+    /// <c>EnvironmentId</c>), always answering <see langword="null"/>. They were <c>[Obsolete]</c>
+    /// from 2.0.0 and removed in 2.1.0; the reflection assertion below is what stops them coming
+    /// back. A phantom property that always answers <see langword="null"/> is worse than an absent
+    /// one: it reads as "this licence has no policy" rather than "ask the other route".
+    /// </remarks>
     [Fact]
-    public async Task GetLicenseAsync_LeavesTheObsoleteRelationshipIdsNull()
+    public async Task GetLicenseAsync_CarriesNoLinkToThePolicy_AndNoPhantomIdPretendsOtherwise()
     {
         var (client, handler) = MakeClient();
         var body = """{"data":{"type":"licenses","id":"11111111-1111-4111-8111-111111111111","attributes":{"status":"ACTIVE"}}}""";
@@ -451,12 +457,15 @@ public class PolicyReadTests
 
         var license = await client.GetLicenseAsync(Guid.Parse("11111111-1111-4111-8111-111111111111"));
 
-#pragma warning disable CS0618 // pinning the documented "always null" behaviour is the point
-        Assert.Null(license.PolicyId);
-        Assert.Null(license.ProductId);
-        Assert.Null(license.UserId);
-        Assert.Null(license.EnvironmentId);
-#pragma warning restore CS0618
+        Assert.Equal(Guid.Parse("11111111-1111-4111-8111-111111111111"), license.Id);
+        Assert.Equal("ACTIVE", license.Status);
+
+        foreach (var removed in new[] { "ProductId", "PolicyId", "UserId", "EnvironmentId" })
+        {
+            Assert.Null(typeof(License).GetProperty(removed));
+        }
+
+        Assert.Null(typeof(Machine).GetProperty("LicenseId"));
     }
 
     [Fact]

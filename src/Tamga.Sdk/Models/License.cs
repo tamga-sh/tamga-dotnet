@@ -69,8 +69,16 @@ public sealed record Scope
     /// validate call with <c>422 SCOPE_NOT_SUPPORTED</c>, so this SDK drops it rather than
     /// degrading a working call into a hard error.
     /// </summary>
+    /// <remarks>
+    /// Deliberately NOT removed alongside the relationship ids that went in 2.1.0. Those carried a
+    /// removal notice through a shipped release; this one did not, and a deprecation a consumer was
+    /// never told about is not a deprecation cycle. The announcement starts here, so the removal
+    /// belongs to the next MAJOR. Keeping it costs nothing in the meantime: <c>[JsonIgnore]</c>
+    /// means a caller who sets it still gets exactly the documented no-op rather than the server's
+    /// <c>422</c>.
+    /// </remarks>
     [JsonIgnore]
-    [Obsolete("The server rejects scope.version with 422 SCOPE_NOT_SUPPORTED, failing the whole validate call. This SDK no longer sends it; setting it has no effect.")]
+    [Obsolete("The server rejects scope.version with 422 SCOPE_NOT_SUPPORTED, failing the whole validate call. This SDK no longer sends it; setting it has no effect. Scheduled for removal in the next major release — first announced in 2.1.0.")]
     public string? Version { get; init; }
 
     /// <summary>
@@ -78,8 +86,16 @@ public sealed record Scope
     /// validate call with <c>422 SCOPE_NOT_SUPPORTED</c>, so this SDK drops it rather than
     /// degrading a working call into a hard error.
     /// </summary>
+    /// <remarks>
+    /// Deliberately NOT removed alongside the relationship ids that went in 2.1.0. Those carried a
+    /// removal notice through a shipped release; this one did not, and a deprecation a consumer was
+    /// never told about is not a deprecation cycle. The announcement starts here, so the removal
+    /// belongs to the next MAJOR. Keeping it costs nothing in the meantime: <c>[JsonIgnore]</c>
+    /// means a caller who sets it still gets exactly the documented no-op rather than the server's
+    /// <c>422</c>.
+    /// </remarks>
     [JsonIgnore]
-    [Obsolete("The server rejects scope.checksum with 422 SCOPE_NOT_SUPPORTED, failing the whole validate call. This SDK no longer sends it; setting it has no effect.")]
+    [Obsolete("The server rejects scope.checksum with 422 SCOPE_NOT_SUPPORTED, failing the whole validate call. This SDK no longer sends it; setting it has no effect. Scheduled for removal in the next major release — first announced in 2.1.0.")]
     public string? Checksum { get; init; }
 }
 
@@ -252,22 +268,6 @@ public sealed record License
     /// <summary>When the license was last updated.</summary>
     public DateTimeOffset? Updated { get; init; }
 
-    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
-    [Obsolete("Always null: the server's license serializer emits only { type, id, attributes } — there is no `relationships` object on a `licenses` resource for this to be read from, and there never was. Use GET /licenses/{id}/product instead. Scheduled for removal in the next minor release.")]
-    public Guid? ProductId { get; init; }
-
-    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
-    [Obsolete("Always null: the server's license serializer emits only { type, id, attributes } — there is no `relationships` object on a `licenses` resource for this to be read from, and there never was. Use GET /licenses/{id}/policy instead. Scheduled for removal in the next minor release.")]
-    public Guid? PolicyId { get; init; }
-
-    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
-    [Obsolete("Always null: the server's license serializer emits only { type, id, attributes } — there is no `relationships` object on a `licenses` resource for this to be read from, and there never was. Use GET /licenses/{id}/owner instead. Scheduled for removal in the next minor release.")]
-    public Guid? UserId { get; init; }
-
-    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
-    [Obsolete("Always null: the server's license serializer emits only { type, id, attributes } — there is no `relationships` object on a `licenses` resource for this to be read from, and there never was. Scheduled for removal in the next minor release.")]
-    public Guid? EnvironmentId { get; init; }
-
     /// <summary>Arbitrary key/value metadata attached to the license.</summary>
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
@@ -280,8 +280,10 @@ public sealed record License
     /// <remarks>
     /// Deliberately does not read <c>data.relationships</c>: the server never emits one on a
     /// license. The four id properties that used to be populated from it
-    /// (<c>ProductId</c>/<c>PolicyId</c>/<c>UserId</c>/<c>EnvironmentId</c>) are obsolete and left
-    /// unset.
+    /// (<c>ProductId</c>/<c>PolicyId</c>/<c>UserId</c>/<c>EnvironmentId</c>) were always
+    /// <see langword="null"/>, were marked <c>[Obsolete]</c> in 2.0.0 and removed in 2.1.0. Use the
+    /// dedicated <c>GET /licenses/{id}/product</c> · <c>/policy</c> · <c>/owner</c> routes to
+    /// resolve them for real; there is no route for the environment.
     /// </remarks>
     public static License FromResource(JsonApiResource<LicenseAttributes> resource)
     {

@@ -230,10 +230,6 @@ public sealed record Machine
     /// <summary>When the machine was last checked out (offline <c>.machine</c> file issued).</summary>
     public DateTimeOffset? LastCheckOutAt { get; init; }
 
-    /// <summary>Always <see langword="null"/>. See the obsolete note.</summary>
-    [Obsolete("Always null: the server's machine serializer emits only { type, id, attributes } — `relationships` appears on the machine CREATE request body but never on any response, so there is nothing for this to be read from. Track the license id you activated with on your own side. Scheduled for removal in the next minor release.")]
-    public Guid? LicenseId { get; init; }
-
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
@@ -246,8 +242,11 @@ public sealed record Machine
     /// <summary>Flattens a raw JSON:API machine resource into a <see cref="Machine"/>. Shared by <see cref="TamgaClient"/> and <see cref="Checkout.MachineFile"/>.</summary>
     /// <remarks>
     /// Deliberately does not read <c>data.relationships</c>: the server never emits one on a
-    /// machine response. <c>LicenseId</c>, which used to be populated from it, is obsolete and left
-    /// unset — same defect and same handling as <see cref="License"/>'s four relationship ids.
+    /// machine response. A <c>LicenseId</c> property used to be populated from it; it was always
+    /// <see langword="null"/>, was marked <c>[Obsolete]</c> in 2.0.0 and removed in 2.1.0 — same
+    /// defect, same history and same handling as <see cref="License"/>'s four relationship ids.
+    /// Track the license id you activated with on your own side, or pass it back through
+    /// <see cref="CreateMachineRequest.LicenseId"/>, which is a live REQUEST field and unrelated.
     /// </remarks>
     public static Machine FromResource(JsonApiResource<MachineAttributes> resource)
     {
