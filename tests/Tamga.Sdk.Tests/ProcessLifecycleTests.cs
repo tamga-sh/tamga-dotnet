@@ -111,7 +111,10 @@ public class ProcessLifecycleTests
         var (client, handler) = MakeClient();
         handler.Enqueue(HttpStatusCode.NoContent, "");
 
-        var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMilliseconds(10))
+        // No tick is needed or wanted here: this asserts what DisposeAsync does, not what the
+        // loop does. (It used to pass 10ms and incidentally cover the ping-failure path; that path
+        // now has its own test rather than depending on a race.)
+        var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromMinutes(10))
         {
             DeleteOnDispose = true,
         };

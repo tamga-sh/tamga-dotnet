@@ -314,18 +314,21 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="processId">The ID of the process to ping.</param>
     /// <param name="interval">
-    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, and falls back to
-    /// it when non-positive.
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, falls back to it
+    /// when non-positive, and is raised to one second when positive but shorter.
     /// </param>
     /// <remarks>
     /// Same clamp, and for the same reason, as <see cref="HeartbeatScheduler(TamgaClient, Guid, TimeSpan?)"/>
     /// — see its remarks. A zero or negative <paramref name="interval"/> falls back to
     /// <see cref="DefaultInterval"/> instead of reaching <see cref="PeriodicTimer"/> and throwing
-    /// <see cref="ArgumentOutOfRangeException"/>; <see cref="Timeout.InfiniteTimeSpan"/>, which the
-    /// timer accepts as "never tick", is passed through unchanged. The process window is not
-    /// policy-driven (it is a hardcoded 30s server-side), so a bad value cannot arrive here from a
-    /// policy — but a caller computing an interval arithmetically can still produce one, and the
-    /// two schedulers should not answer the same mistake differently.
+    /// <see cref="ArgumentOutOfRangeException"/>; a positive one shorter than one second is raised
+    /// to one second, because <see cref="PeriodicTimer"/> honours a 1ms period exactly (~765 ticks
+    /// per second on net8.0) and only a floor bounds the request rate; and
+    /// <see cref="Timeout.InfiniteTimeSpan"/>, which the timer accepts as "never tick", is passed
+    /// through unchanged. The process window is not policy-driven (it is a hardcoded 30s
+    /// server-side), so a bad value cannot arrive here from a policy — but a caller computing an
+    /// interval arithmetically can still produce one, and the two schedulers should not answer the
+    /// same mistake differently.
     /// </remarks>
     public ProcessHeartbeatScheduler(TamgaClient client, Guid processId, TimeSpan? interval = null)
     {
@@ -335,13 +338,21 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     }
 
     /// <summary>
-    /// The period actually handed to <see cref="PeriodicTimer"/>: <paramref name="interval"/> when
-    /// the timer accepts it, <see cref="DefaultInterval"/> otherwise. See the constructor's remarks.
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <see cref="Timeout.InfiniteTimeSpan"/>
+    /// untouched, <see cref="DefaultInterval"/> for a non-positive <paramref name="interval"/>, and
+    /// otherwise <paramref name="interval"/> raised to
+    /// <see cref="HeartbeatScheduler.MinimumInterval"/>. Every value this returns is either the
+    /// sentinel or at least one second. See the constructor's remarks.
     /// </summary>
     private static TimeSpan TickPeriod(TimeSpan? interval)
     {
         var period = interval ?? DefaultInterval;
-        return period > TimeSpan.Zero || period == Timeout.InfiniteTimeSpan ? period : DefaultInterval;
+        if (period == Timeout.InfiniteTimeSpan)
+        {
+            return period;
+        }
+
+        return period > TimeSpan.Zero ? HeartbeatScheduler.AtLeastMinimum(period) : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Call once per instance.</summary>
