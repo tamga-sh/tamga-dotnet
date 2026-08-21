@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.1.1](https://github.com/tamga-sh/tamga-dotnet/compare/v2.1.0...v2.1.1) (2026-08-21)
+
+
+### Bug Fixes
+
+* canonicalise caller-supplied fingerprint components so one machine cannot take three seats ([5d33231](https://github.com/tamga-sh/tamga-dotnet/commit/5d332319a5a6a78a05be1a29b46e6c0d7a439d08))
+* close three silent failures that cost a licensed user access, an update or a seat ([b5838b7](https://github.com/tamga-sh/tamga-dotnet/commit/b5838b7987c8d023a44b430f7126cfbfe421554f))
+* correct three artifact claims that were wrong or imprecise as shipped ([794c010](https://github.com/tamga-sh/tamga-dotnet/commit/794c010f48f863ddfb6e4fdcf387ce0152b0554c))
+* read and download release artifacts without handing the credential to the storage host ([b5ca7c0](https://github.com/tamga-sh/tamga-dotnet/commit/b5ca7c072e2c7b20814e6402e856464948ee4d0b))
+* verify offline files against the account's signing-key set so a pre-rotation file is not reported as forged ([088484d](https://github.com/tamga-sh/tamga-dotnet/commit/088484d6058c2039678d2e257bf67fe0785575df))
+
 ## [2.1.0](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.3...v2.1.0) (2026-08-21)
 
 
