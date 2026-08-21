@@ -437,6 +437,42 @@ public class ArtifactTests
         Assert.Equal("STORAGE_UNAVAILABLE", ex.Error.Code);
     }
 
+    /// <summary>
+    /// A server-side TTL rejection arrives as <c>PRESIGN_TTL_INVALID</c>, NOT the
+    /// <c>TTL_INVALID</c> the two checkout routes use — so it does not map to
+    /// <see cref="TtlInvalidException"/>.
+    /// </summary>
+    /// <remarks>
+    /// Pinned because the near-identical name invites the assumption that the existing typed
+    /// exception covers it. <c>artifacts/service.rs:33</c> emits <c>PRESIGN_TTL_INVALID</c>;
+    /// <c>check_out_license.rs:48</c> and <c>check_out_machine.rs:50</c> emit <c>TTL_INVALID</c>;
+    /// only the latter is in <c>TamgaErrorMapper</c>. Asserting the negative is the point.
+    /// </remarks>
+    [Fact]
+    public async Task GetArtifactDownloadUrlAsync_SurfacesPresignTtlInvalid_WhichIsNotTtlInvalid()
+    {
+        var (client, handler) = MakeClient();
+        var body = new JsonObject
+        {
+            ["errors"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["status"] = "422",
+                    ["code"] = "PRESIGN_TTL_INVALID",
+                    ["detail"] = "Presigned URL TTL must be between 1 minute and 1 week",
+                },
+            },
+        }.ToJsonString();
+        handler.Enqueue(HttpStatusCode.UnprocessableEntity, body);
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(
+            () => client.GetArtifactDownloadUrlAsync(Guid.NewGuid()));
+
+        Assert.Equal("PRESIGN_TTL_INVALID", ex.Error.Code);
+        Assert.IsNotType<TtlInvalidException>(ex);
+    }
+
     // ── Byte fetch ───────────────────────────────────────────────────────────
 
     /// <summary>

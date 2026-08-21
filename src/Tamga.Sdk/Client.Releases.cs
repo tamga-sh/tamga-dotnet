@@ -39,11 +39,12 @@ public sealed partial class TamgaClient
     /// </para>
     /// <para>
     /// Note what this endpoint does not give you: the release, not its bytes. The artifacts that
-    /// carry the bytes are a separate resource, reachable since <c>tamga-api</c> <c>e6d317b</c>
-    /// granted <c>artifact.read</c> and <c>artifact.download</c> to <c>Role::LicenseToken</c> —
-    /// see <see cref="ListReleaseArtifactsAsync"/> and <see cref="DownloadArtifactAsync"/>. Until
-    /// that commit the download route was gated behind a permission no role held and this SDK
-    /// documented it as unreachable; that is no longer true.
+    /// carry the bytes are a separate resource — see <see cref="ListReleaseArtifactsAsync"/> and
+    /// <see cref="DownloadArtifactAsync"/>. Their metadata was always readable with a licence key
+    /// (<c>Role::LicenseToken</c> has held <c>artifact.read</c> throughout); what was unreachable
+    /// was the byte fetch, until <c>tamga-api</c> <c>e6d317b</c> granted
+    /// <c>artifact.download</c>. This SDK documented the download as permanently <c>403</c>; that
+    /// is no longer true.
     /// </para>
     /// </remarks>
     /// <exception cref="TamgaApiException">

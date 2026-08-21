@@ -7,11 +7,17 @@ public sealed partial class TamgaClient
     // ---------------------------------------------------------------
     // §M Release artifacts
     //
-    // Reachable with a licence key since tamga-api e6d317b ("grant artifact.download explicitly
-    // and gate the download route"), which added BOTH `artifact.read` and `artifact.download` to
-    // `Role::LicenseToken` (shared/authz/mod.rs:264-265). Before that commit `artifact.download`
-    // appeared in no role's default list at all, so the route 403'd for every non-wildcard bearer
-    // and this SDK deliberately shipped no download method.
+    // Fully reachable with a licence key since tamga-api e6d317b ("grant artifact.download
+    // explicitly and gate the download route").
+    //
+    // Be precise about what that commit changed, because the two halves have different histories.
+    // It added exactly ONE permission per role: `artifact.download` (shared/authz/mod.rs:265, and
+    // the same single line for Role::Developer). `artifact.read` was ALREADY on
+    // `Role::LicenseToken` before it (:264) -- so listing artifacts and reading their metadata was
+    // never the blocked half, and this SDK could have exposed those two routes at any point. Only
+    // fetching the bytes was refused, because `artifact.download` appeared in no role's default
+    // list at all and `effective_permissions` intersects the bearer and token sets, so granting it
+    // on a token could not recover it either.
     //
     // Read-only, and that is a server fact rather than a scoping decision here:
     // `artifact.create`/`update`/`delete` are absent from `Role::LicenseToken`, and
@@ -141,15 +147,34 @@ public sealed partial class TamgaClient
     /// followed automatically, off-origin, by the same client that carries the Tamga credential.
     /// </para>
     /// <para>
-    /// Measured, on net8.0, rather than assumed — because the detail matters and the obvious
-    /// version of the claim is wrong. .NET's redirect handler strips the
-    /// <c>Authorization</c> header on an automatic redirect, so a licence key sent that way does
-    /// <em>not</em> reach the storage host. What it does NOT strip is a <c>Cookie</c> header set
-    /// directly on the request — and <see cref="AuthTransport.Cookie"/> sets exactly that
-    /// (<c>Cookie: Tamga-Session=…</c>, added by hand rather than through a
-    /// <see cref="System.Net.CookieContainer"/>). That header is forwarded verbatim, cross-origin,
-    /// to whatever host the presigned URL names. So the leak is real, it is the session
-    /// credential rather than the licence key, and no handler default protects against it.
+    /// Measured on net8.0 rather than assumed, both hops, against a control request that proves
+    /// the credentials were present to begin with — because the obvious version of the claim is
+    /// wrong and .NET does not behave like the Fetch standard here:
+    /// </para>
+    /// <list type="table">
+    /// <listheader><term>hop</term><description>Authorization / Cookie</description></listheader>
+    /// <item><term>no redirect</term><description>sent / sent</description></item>
+    /// <item><term>same-origin <c>303</c></term><description><b>stripped</b> / <b>forwarded</b></description></item>
+    /// <item><term>cross-origin <c>303</c></term><description><b>stripped</b> / <b>forwarded</b></description></item>
+    /// </list>
+    /// <para>
+    /// So <see cref="HttpClient"/> drops <c>Authorization</c> on <em>every</em> automatic
+    /// redirect, same-origin included — stricter than <c>fetch</c>, which keeps it within an
+    /// origin — and a licence key therefore does <em>not</em> reach the storage host this way.
+    /// What it does NOT drop is a <c>Cookie</c> header set directly on the request, and
+    /// <see cref="AuthTransport.Cookie"/> sets exactly that (<c>Cookie: Tamga-Session=…</c>, added
+    /// by hand rather than through a <see cref="System.Net.CookieContainer"/>). That one is
+    /// forwarded verbatim on both hops. So the leak is real, it is the session credential rather
+    /// than the licence key, and no handler default protects against it. Do not carry this table
+    /// over to another Tamga SDK — the sibling ports measured different answers on their own
+    /// runtimes.
+    /// </para>
+    /// <para>
+    /// There is a second reason not to follow the redirect that holds whatever the credentials do:
+    /// this SDK reads a JSON:API response with <c>ReadAsStringAsync</c>. A followed <c>303</c>
+    /// would therefore pull the entire artifact into a single <see cref="string"/> and then try to
+    /// parse it as JSON. Artifacts are installers; that is an out-of-memory failure, not a parse
+    /// error.
     /// </para>
     /// <para>
     /// Asking for <c>redirect=false</c> sidesteps the whole question: the server returns the
@@ -177,7 +202,15 @@ public sealed partial class TamgaClient
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="ttl"/> is outside <see cref="MinDownloadTtlSeconds"/>..<see cref="MaxDownloadTtlSeconds"/>, or is not a whole number of seconds.</exception>
     /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such artifact, or its release is gone.</exception>
     /// <exception cref="TamgaForbiddenException"><c>403 FORBIDDEN</c> — no <c>artifact.download</c>, OR the owning release's access gate refused. See the remarks.</exception>
-    /// <exception cref="TamgaApiException"><c>422 STORAGE_UNAVAILABLE</c> when the server has no object-storage backend configured, and <c>422</c> on a TTL the server rejects.</exception>
+    /// <exception cref="TamgaApiException">
+    /// <c>422 STORAGE_UNAVAILABLE</c> when the server has no object-storage backend configured.
+    /// Also <c>422 PRESIGN_TTL_INVALID</c> on a TTL the server rejects — note the code:
+    /// <c>artifacts/service.rs:33</c> emits <c>PRESIGN_TTL_INVALID</c>, NOT the <c>TTL_INVALID</c>
+    /// the two checkout routes use, so it does <b>not</b> map to
+    /// <see cref="TtlInvalidException"/> and arrives as the base type. Match on
+    /// <see cref="TamgaApiError.Code"/>. In practice the <paramref name="ttl"/> guard above should
+    /// mean a correct caller never sees it.
+    /// </exception>
     public async Task<ArtifactDownload> GetArtifactDownloadUrlAsync(
         Guid artifactId,
         TimeSpan? ttl = null,
