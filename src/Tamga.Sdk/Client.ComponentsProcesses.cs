@@ -125,6 +125,32 @@ public sealed partial class TamgaClient
             ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Ping process returned an empty body." });
     }
 
+    /// <summary><c>DELETE /processes/{id}</c> — removes a process row. <c>204</c>, no body.</summary>
+    /// <param name="processId">The process to delete.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>Nothing deletes these rows for you.</b> The server has a process reaper, but it is not
+    /// wired to run — so unlike the machine cull (which at least runs when
+    /// <c>policy.require_heartbeat</c> is set), a process row outlives the process it represents
+    /// forever unless a client removes it. Every run of a short-lived worker that registers a
+    /// process therefore leaks one row, and those rows count against the policy's
+    /// <c>max_processes</c> limit, so a long-running install eventually starts failing activation
+    /// with <see cref="TooManyProcessesException"/> for processes that exited months ago.
+    /// </para>
+    /// <para>
+    /// Call this when the process ends. <see cref="ProcessHeartbeatScheduler.DeleteOnDispose"/>
+    /// wires it to the scheduler's own lifetime for the common case.
+    /// </para>
+    /// <para>
+    /// A <c>404</c> means the row is already gone — for a cleanup path that is usually success, not
+    /// failure. Treat <see cref="TamgaNotFoundException"/> accordingly.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such process; it was already deleted.</exception>
+    public Task DeleteProcessAsync(Guid processId, CancellationToken cancellationToken = default) =>
+        _transport.DeleteAsync($"/processes/{processId}", cancellationToken);
+
     private static string? BuildPaginationQuery(int? limit, string? after)
     {
         var parts = new List<string>();
@@ -169,6 +195,31 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
 
     /// <summary>Raised when a ping throws, or when a <see cref="Pinged"/> handler itself throws — the loop continues on the next tick rather than terminating.</summary>
     public event Action<Exception>? Faulted;
+
+    /// <summary>
+    /// Whether <see cref="DisposeAsync"/> should also <c>DELETE</c> the process row. Defaults to
+    /// <see langword="false"/>, which preserves the previous behaviour.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Set it when the scheduler's lifetime matches the process's — the usual case, since a
+    /// scheduler exists to say "this process is still running". Nothing on the server removes the
+    /// row otherwise (see <see cref="TamgaClient.DeleteProcessAsync"/>), so without this every run
+    /// of the host application leaves one behind, and they count against
+    /// <c>policy.max_processes</c>.
+    /// </para>
+    /// <para>
+    /// The delete runs on its own <see cref="CancellationToken"/>, not the one that just stopped
+    /// the loop — cancelling the pings is the signal to clean up, so reusing that token would
+    /// cancel the cleanup along with them. A failed delete is reported on <see cref="Faulted"/> and
+    /// never propagates out of <see cref="DisposeAsync"/>: throwing from disposal would mask
+    /// whatever exception was already unwinding the caller's <c>await using</c> block.
+    /// </para>
+    /// <para>
+    /// Set it before <see cref="Start"/>; it is read once, at disposal.
+    /// </para>
+    /// </remarks>
+    public bool DeleteOnDispose { get; init; }
 
     /// <summary>Creates a scheduler for a single process. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
@@ -235,7 +286,10 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
         }
     }
 
-    /// <summary>Stops the background heartbeat loop and releases resources. Safe to call more than once.</summary>
+    /// <summary>
+    /// Stops the background heartbeat loop, optionally deletes the process row
+    /// (<see cref="DeleteOnDispose"/>), and releases resources. Safe to call more than once.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -254,6 +308,23 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
             catch (OperationCanceledException)
             {
                 // expected
+            }
+        }
+
+        if (DeleteOnDispose)
+        {
+            try
+            {
+                // CancellationToken.None on purpose: _cts was just cancelled to stop the pings, and
+                // that is precisely the moment the row should be removed. Threading the same token
+                // through would cancel the cleanup the cancellation was asking for.
+                await _client.DeleteProcessAsync(_processId, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Disposal must not throw. A cleanup failure is worth reporting, but not at the
+                // cost of replacing whatever exception was already unwinding the caller's scope.
+                InvokeFaulted(ex);
             }
         }
 
