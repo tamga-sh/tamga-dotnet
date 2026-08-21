@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Tamga.Sdk.Models;
 
 namespace Tamga.Sdk;
@@ -164,6 +165,291 @@ public sealed partial class TamgaClient
         return Machine.FromResource(doc.Data ?? throw MissingDataError());
     }
 
+    // ---------------------------------------------------------------
+    // §G.2 Machine reads
+    //
+    // These are the SDK's only READ-backed machine routes over the network, and that matters for
+    // one field: the query behind them LEFT JOINs `policies`, so `HeartbeatStatus` and
+    // `NextHeartbeatAt` are computed against the policy's real window rather than the 600s
+    // fallback the write routes report — and `DEAD` is genuinely reachable here, unlike from any
+    // ping, create or reset. See HeartbeatScheduler's remarks for why that distinction is
+    // write-vs-read rather than a list of routes.
+    // ---------------------------------------------------------------
+
+    /// <summary><c>GET /machines/{id}</c> — reads a machine resource.</summary>
+    /// <param name="machineId">The machine to read.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// Unlike <see cref="PingHeartbeatAsync"/>, this is a genuine staleness verdict: nothing here
+    /// wrote <c>last_heartbeat_at</c> first, so <see cref="Machine.HeartbeatStatus"/> can come back
+    /// <see cref="HeartbeatStatus.Dead"/> and <see cref="Machine.NextHeartbeatAt"/> is derived from
+    /// the policy's window. <c>NextHeartbeatAt - LastHeartbeatAt</c> on this result therefore
+    /// recovers the effective window, the same way a checked-out <c>.machine</c> file does — null
+    /// until the machine has pinged at least once.
+    /// </para>
+    /// <para>
+    /// <see cref="HeartbeatStatus.Dead"/> here still does not mean the row was culled or its seat
+    /// released: culling is gated on <c>policy.require_heartbeat</c>, which defaults to
+    /// <see langword="false"/>. A <c>404</c> is the only proof the row is gone.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
+    public async Task<Machine> GetMachineAsync(Guid machineId, CancellationToken cancellationToken = default)
+    {
+        var doc = await _transport.SendJsonApiAsync<MachineAttributes>(
+            HttpMethod.Get, $"/machines/{machineId}", cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Machine.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary><c>PATCH /machines/{id}</c> — updates a machine's mutable attributes.</summary>
+    /// <param name="machineId">The machine to update.</param>
+    /// <param name="request">The attributes to change; omitted ones are left untouched.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// Enveloped like <see cref="CreateMachineAsync"/> (<c>{"data":{"type":"machines","attributes":{…}}}</c>),
+    /// unlike the flat component/process creates. A field cannot be set back to null through this
+    /// route — see <see cref="UpdateMachineRequest"/>.
+    /// </remarks>
+    /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
+    public async Task<Machine> UpdateMachineAsync(Guid machineId, UpdateMachineRequest request, CancellationToken cancellationToken = default)
+    {
+        var body = new JsonApiCreateRequest<MachineAttributes>
+        {
+            Data = new JsonApiCreateRequestData<MachineAttributes>
+            {
+                Type = "machines",
+                Attributes = new MachineAttributes
+                {
+                    Name = request.Name,
+                    Ip = request.Ip,
+                    Hostname = request.Hostname,
+                    Platform = request.Platform,
+                    Cores = request.Cores,
+                    Memory = request.Memory,
+                    Disk = request.Disk,
+                    Metadata = request.Metadata,
+                },
+            },
+        };
+
+        var doc = await _transport.SendJsonApiAsync<MachineAttributes>(
+            HttpMethod.Patch, $"/machines/{machineId}", jsonBody: body, cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Machine.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary>The server's maximum (and this SDK's default) page size for the machine collection — <c>page[size]</c> is clamped to <c>1..100</c> server-side.</summary>
+    private const int MaxMachinesPageSize = 100;
+
+    /// <summary>
+    /// <c>GET /machines</c> — lists the account's machines, OFFSET-paginated.
+    /// </summary>
+    /// <param name="pageNumber">1-based page number. Defaults to <c>1</c>.</param>
+    /// <param name="pageSize">Rows per page, <c>1..100</c>. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25. Values above 100 are clamped to match the server's own clamp.</param>
+    /// <param name="search">
+    /// Free-text search, sent as <c>filter[q]</c>. A case-insensitive SUBSTRING match run across
+    /// <c>name</c>, <c>hostname</c> AND <c>fingerprint</c> — not an exact-match filter on any one
+    /// of them. See <see cref="FindMachineByFingerprintAsync"/>.
+    /// </param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>This listing is OFFSET-paginated, not keyset.</b> It returns
+    /// <c>meta.page{number,size,total,totalPages}</c> — an exact count from the same filter that
+    /// selected the rows — so it yields an <see cref="OffsetPage{T}"/> and there is no cursor to
+    /// thread. Do not reach for <see cref="Page{T}"/>'s <c>NextCursor</c> pattern here, and do not
+    /// synthesize one: the entitlement and component listings work the other way round and
+    /// confusing the two drops rows in whichever direction the mistake was made. Walk pages while
+    /// <see cref="OffsetPage{T}.HasMore"/>.
+    /// </para>
+    /// <para>
+    /// The server refuses an offset past 100 000 rows with <c>400 PAGE_OUT_OF_RANGE</c>, which at
+    /// the maximum page size is page 1001.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="pageNumber"/> or <paramref name="pageSize"/> is less than 1.</exception>
+    public async Task<OffsetPage<Machine>> ListMachinesAsync(
+        int? pageNumber = null,
+        int? pageSize = null,
+        string? search = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (pageNumber is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(pageNumber), pageNumber, "Page numbers are 1-based; pass null for the first page.");
+        }
+
+        if (pageSize is < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(pageSize), pageSize, "Page size must be at least 1; pass null for the default of 100.");
+        }
+
+        var effectiveNumber = pageNumber ?? 1;
+        var effectiveSize = Math.Min(pageSize ?? MaxMachinesPageSize, MaxMachinesPageSize);
+
+        var parts = new List<string>
+        {
+            $"page%5Bnumber%5D={effectiveNumber}",
+            $"page%5Bsize%5D={effectiveSize}",
+        };
+        if (!string.IsNullOrEmpty(search))
+        {
+            parts.Add($"filter%5Bq%5D={Uri.EscapeDataString(search)}");
+        }
+
+        var doc = await _transport.SendJsonApiListAsync<MachineAttributes>(
+            HttpMethod.Get, "/machines", query: string.Join('&', parts), cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        var items = doc.Data.Select(Machine.FromResource).ToList();
+        var page = doc.Meta?.Deserialize<JsonApiListMeta>(TamgaJsonOptions.Default)?.Page;
+
+        return new OffsetPage<Machine>
+        {
+            Items = items,
+            // Fall back to what was asked for rather than to zero: a missing `meta.page` would
+            // otherwise report TotalPages = 0, which makes HasMore false and silently ends a walk
+            // on its first page.
+            Number = page?.Number ?? effectiveNumber,
+            Size = page?.Size ?? effectiveSize,
+            Total = page?.Total ?? items.Count,
+            TotalPages = page?.TotalPages ?? (items.Count == 0 ? 0 : effectiveNumber),
+        };
+    }
+
+    /// <summary>
+    /// Finds the machine holding an exact fingerprint, or <see langword="null"/> if the account has
+    /// none.
+    /// </summary>
+    /// <param name="fingerprint">The exact fingerprint to look for.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// ⚠ <b>There is no exact-match fingerprint filter on the machine collection.</b> The only
+    /// fingerprint-aware query parameter is <c>filter[q]</c>, a case-insensitive substring search
+    /// that also matches <c>name</c> and <c>hostname</c>. So this sends the fingerprint as a search
+    /// term and then re-checks <see cref="Machine.Fingerprint"/> for exact equality client-side,
+    /// walking pages until it finds a match or runs out. Anything that trusted the search result
+    /// directly could return a machine whose <em>hostname</em> merely contained the fingerprint.
+    /// </para>
+    /// <para>
+    /// The comparison is ordinal and case-sensitive, matching how the server stores and uniqueness-
+    /// checks the column. Scoped to the account on the credential; no cross-account read is
+    /// possible.
+    /// </para>
+    /// </remarks>
+    public async Task<Machine?> FindMachineByFingerprintAsync(string fingerprint, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(fingerprint))
+        {
+            return null;
+        }
+
+        var pageNumber = 1;
+        while (true)
+        {
+            var page = await ListMachinesAsync(pageNumber, MaxMachinesPageSize, fingerprint, cancellationToken).ConfigureAwait(false);
+            var match = page.Items.FirstOrDefault(m => string.Equals(m.Fingerprint, fingerprint, StringComparison.Ordinal));
+            if (match is not null)
+            {
+                return match;
+            }
+
+            if (!page.HasMore)
+            {
+                return null;
+            }
+
+            pageNumber++;
+        }
+    }
+
+    /// <summary>
+    /// Activation that treats <c>409 FINGERPRINT_TAKEN</c> as "already activated" instead of a
+    /// dead end: creates the machine, or adopts the existing one holding that fingerprint, then
+    /// validates the license either way.
+    /// </summary>
+    /// <param name="request">The machine to activate.</param>
+    /// <param name="deleteOnOverLimit">Whether to roll back an over-limit activation. Applies ONLY to a machine this call created — see the remarks.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// <para>
+    /// The server reports a re-activation of the same fingerprint as a conflict on purpose, and
+    /// <see cref="CreateMachineAsync"/> and <see cref="ActivateMachineAsync"/> both surface that
+    /// raw. For an application whose activation step can run twice — a reinstall, a crash before
+    /// the machine id was persisted, a user clicking "activate" again — that leaves no way forward
+    /// except catching the exception and guessing. This method is the way forward: it looks the
+    /// fingerprint up (see <see cref="FindMachineByFingerprintAsync"/>) and carries on with the row
+    /// that already exists, reporting it as <see cref="MachineActivation.AlreadyActivated"/>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>An adopted machine is never rolled back.</b> When the fingerprint was already taken,
+    /// <paramref name="deleteOnOverLimit"/> is ignored even on an over-limit verdict: deleting a row
+    /// this call did not create would destroy a seat — possibly another install's, possibly another
+    /// license's — on the strength of a limit that machine did not cause. The over-limit code still
+    /// reaches you in <see cref="MachineActivation.Validation"/>; what to do about a seat you did
+    /// not take is the caller's decision, not this method's.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>The adopted machine is not guaranteed to belong to the license you passed.</b> Under a
+    /// policy whose <see cref="Policy.MachineUniquenessStrategy"/> is <c>UNIQUE_PER_POLICY</c> or
+    /// <c>UNIQUE_PER_ACCOUNT</c>, the conflict can come from a machine attached to a
+    /// <em>different</em> license, and no machine response carries a license id to check that with
+    /// (the resource has no <c>relationships</c> object). On those policies treat
+    /// <see cref="MachineActivation.AlreadyActivated"/> as "this fingerprint is spoken for
+    /// somewhere in the account", not as "this fingerprint is mine".
+    /// </para>
+    /// <para>
+    /// A create-time limit rejection (<c>422</c>) still propagates as a
+    /// <see cref="TamgaLimitExceededException"/>: no row was written, so there is nothing to adopt
+    /// and nothing to roll back.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="FingerprintTakenException">The create conflicted and no machine with that exact fingerprint could be found afterwards — so the conflict was not a re-activation this method can resolve. The original error is preserved.</exception>
+    /// <exception cref="TamgaLimitExceededException">The server refused the create itself.</exception>
+    public async Task<MachineActivation> ActivateMachineIdempotentAsync(
+        CreateMachineRequest request,
+        bool deleteOnOverLimit = true,
+        CancellationToken cancellationToken = default)
+    {
+        Machine machine;
+        var alreadyActivated = false;
+
+        try
+        {
+            machine = await CreateMachineAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (FingerprintTakenException)
+        {
+            var existing = await FindMachineByFingerprintAsync(request.Fingerprint, cancellationToken).ConfigureAwait(false);
+            if (existing is null)
+            {
+                // The conflict is real but not a re-activation of a row we can see — e.g. a
+                // uniqueness scope that reaches rows this credential cannot list. Rethrowing keeps
+                // the server's own code and detail rather than inventing a second story about it.
+                throw;
+            }
+
+            machine = existing;
+            alreadyActivated = true;
+        }
+
+        var validation = await ValidateByIdAsync(request.LicenseId, cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (deleteOnOverLimit && !alreadyActivated && IsOverLimitCode(validation.Code))
+        {
+            await DeleteMachineAsync(machine.Id, cancellationToken).ConfigureAwait(false);
+        }
+
+        return new MachineActivation
+        {
+            Machine = machine,
+            Validation = validation,
+            AlreadyActivated = alreadyActivated,
+        };
+    }
+
     private static TamgaApiException MissingDataError() =>
         new(new TamgaApiError { Status = 200, Code = "MISSING_DATA", Detail = "Response had no resource." });
 }
@@ -270,6 +556,32 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// when no machine file is available.
     /// </remarks>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(ServerHeartbeatWindowSeconds / 3.0);
+
+    /// <summary>
+    /// The ping interval for a given heartbeat window — the window divided by three, the same ratio
+    /// <see cref="DefaultInterval"/> uses against the 600s fallback.
+    /// </summary>
+    /// <param name="window">The effective heartbeat window, e.g. <see cref="Policy.EffectiveHeartbeatWindow"/>.</param>
+    /// <returns>An interval comfortably inside <paramref name="window"/>.</returns>
+    /// <remarks>
+    /// <para>
+    /// Three ticks per window means two pings can be lost — to a 429 that outlived its retry
+    /// budget, a network blip, a suspended process — before the machine falls outside the window
+    /// server-side. One tick per window would leave no margin at all; the machine would lapse to
+    /// <c>DEAD</c> on the first missed ping, and (on a policy that sets <c>require_heartbeat</c>)
+    /// eventually be culled, without the client being able to see it happen.
+    /// </para>
+    /// <para>
+    /// A non-positive <paramref name="window"/> yields <see cref="DefaultInterval"/> rather than a
+    /// zero or negative interval, which <see cref="PeriodicTimer"/> would reject.
+    /// </para>
+    /// <para>
+    /// Pair with <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>,
+    /// which fetches the governing policy and applies this in one call.
+    /// </para>
+    /// </remarks>
+    public static TimeSpan IntervalForWindow(TimeSpan window) =>
+        window > TimeSpan.Zero ? TimeSpan.FromSeconds(window.TotalSeconds / 3.0) : DefaultInterval;
 
     private readonly TamgaClient _client;
     private readonly Guid _machineId;
