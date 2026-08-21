@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
@@ -136,17 +137,52 @@ public sealed class MachineProof
 /// serialization order (see <see cref="MachineProof"/>'s remarks). Arrays keep their original
 /// element order (JSON arrays are ordered by spec; only object keys get sorted).
 /// </summary>
+/// <remarks>
+/// Two details here are signature-critical, and both were wrong before:
+///
+/// <b>Escaping.</b> <c>System.Text.Json</c>'s default encoder escapes far more than JSON requires
+/// — every non-ASCII character plus <c>+</c>, <c>&lt;</c>, <c>&gt;</c>, <c>&amp;</c> and <c>'</c>
+/// — as XSS defence for HTML embedding. <c>serde_json</c> escapes only <c>"</c>, <c>\</c> and
+/// control characters. Any of those characters in the payload therefore produced different bytes
+/// from the ones the server signed, and verification failed on an authentic proof. A base64-shaped
+/// hardware fingerprint routinely contains <c>+</c>, so this was not an edge case.
+/// <see cref="JavaScriptEncoder.UnsafeRelaxedJsonEscaping"/> matches <c>serde_json</c>. "Unsafe"
+/// here means "do not paste this into HTML without escaping" — this output is signature input, it
+/// is never rendered.
+///
+/// <b>Key order.</b> <see cref="StringComparer.Ordinal"/> compares UTF-16 code units;
+/// <c>BTreeMap&lt;String, _&gt;</c> compares UTF-8 bytes. The two disagree for any key containing
+/// a character above U+FFFF (surrogate pairs sort before U+E000..U+FFFF in UTF-16, after them in
+/// UTF-8), so key sets mixing emoji/CJK-extension keys with high-BMP ones would be ordered
+/// differently from the signed bytes. Comparing UTF-8 bytes directly removes the whole class.
+/// </remarks>
 internal static class CanonicalJson
 {
+    private static readonly JsonWriterOptions WriterOptions = new()
+    {
+        Indented = false,
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
     public static string Serialize(JsonNode? node)
     {
         using var stream = new MemoryStream();
-        using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions { Indented = false }))
+        using (var writer = new Utf8JsonWriter(stream, WriterOptions))
         {
             WriteNode(writer, node);
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>Orders keys by their UTF-8 bytes, matching <c>BTreeMap&lt;String, _&gt;</c> — not by UTF-16 code unit.</summary>
+    private sealed class Utf8OrdinalComparer : IComparer<string>
+    {
+        public static readonly Utf8OrdinalComparer Instance = new();
+
+        public int Compare(string? x, string? y) =>
+            Encoding.UTF8.GetBytes(x ?? string.Empty).AsSpan()
+                .SequenceCompareTo(Encoding.UTF8.GetBytes(y ?? string.Empty));
     }
 
     private static void WriteNode(Utf8JsonWriter writer, JsonNode? node)
@@ -158,7 +194,7 @@ internal static class CanonicalJson
                 break;
             case JsonObject obj:
                 writer.WriteStartObject();
-                foreach (var key in obj.Select(kv => kv.Key).OrderBy(k => k, StringComparer.Ordinal))
+                foreach (var key in obj.Select(kv => kv.Key).OrderBy(k => k, Utf8OrdinalComparer.Instance))
                 {
                     writer.WritePropertyName(key);
                     WriteNode(writer, obj[key]);

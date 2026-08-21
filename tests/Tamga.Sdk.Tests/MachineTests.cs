@@ -29,7 +29,8 @@ public class MachineTests
     public async Task CreateMachineAsync_MapsFingerprintTaken_ToTypedException()
     {
         var (client, handler) = MakeClient();
-        const string errorBody = """{"errors":[{"id":"1","status":409,"code":"FINGERPRINT_TAKEN","title":"t","detail":"taken"}]}""";
+        // Real wire shape: `status` is a string.
+        const string errorBody = """{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"This fingerprint is already activated within the policy's uniqueness scope"}]}""";
         handler.Enqueue(HttpStatusCode.Conflict, errorBody);
 
         var request = new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = Guid.NewGuid() };
@@ -48,6 +49,78 @@ public class MachineTests
         var body = handler.Requests[0].Body!;
         Assert.Contains(licenseId.ToString(), body);
         Assert.Contains("\"type\":\"licenses\"", body);
+    }
+
+    /// <summary>
+    /// The create-time quota path. The server now checks machine/core/memory/disk limits inside
+    /// the create transaction, so an over-limit activation can be refused before a row exists —
+    /// and when that happens there is nothing to roll back. Issuing a DELETE here would target a
+    /// machine that was never created.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineAsync_PropagatesACreateTime422_WithoutValidatingOrDeleting()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+
+        const string errorBody = """
+        {"errors":[{"id":"01926b3e-0000-7000-8000-000000000000","status":"422","code":"MACHINE_LIMIT_EXCEEDED","title":"Unprocessable Entity","detail":"This license has reached its machine limit"}]}
+        """;
+        handler.Enqueue(HttpStatusCode.UnprocessableEntity, errorBody);
+
+        var ex = await Assert.ThrowsAsync<MachineLimitExceededException>(() =>
+            client.ActivateMachineAsync(new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId }));
+
+        // Exactly one request: the create. No validate, and crucially no DELETE.
+        Assert.Single(handler.Requests);
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Request.Method);
+        Assert.DoesNotContain(handler.Requests, r => r.Request.Method == HttpMethod.Delete);
+
+        // The server's own code survives, and normalizes onto the validate-time equivalent so a
+        // caller can handle both over-limit paths with one value.
+        Assert.Equal("MACHINE_LIMIT_EXCEEDED", ex.Error.Code);
+        Assert.Equal(ValidationCode.TooManyMachines, ex.EquivalentValidationCode);
+    }
+
+    /// <summary>
+    /// The overage path, which the create-time check did NOT replace. The server applies the
+    /// policy's overage strategy to its create-time limit check, so under <c>ALLOW_ACCESS</c> or
+    /// <c>ALLOW_1_25X_OVERAGE</c> the machine row IS written and only <c>validate</c> objects —
+    /// which is exactly the case the create → validate → rollback dance exists for.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineAsync_StillRollsBack_WhenOverageLetsTheCreateSucceed_AndValidateReportsTheLimit()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var licenseId = Guid.NewGuid();
+
+        // 1) create succeeds — the policy's overage strategy allowed the extra seat.
+        handler.Enqueue(HttpStatusCode.OK, MachineResourceJson(machineId));
+        // 2) validate reports the overage anyway.
+        handler.Enqueue(HttpStatusCode.OK, $$"""
+        {
+            "data": {
+                "type": "licenses",
+                "id": "{{licenseId}}",
+                "attributes": { "key": "L", "status": "ACTIVE", "suspended": false, "uses": 0, "machines_count": 6, "max_machines": 5 }
+            },
+            "meta": { "ts": "2024-01-01T00:00:00Z", "valid": false, "detail": "over limit", "code": "TOO_MANY_MACHINES" }
+        }
+        """);
+        // 3) rollback.
+        handler.Enqueue(HttpStatusCode.NoContent, "");
+
+        var (machine, validation) = await client.ActivateMachineAsync(
+            new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId });
+
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.Equal(HttpMethod.Delete, handler.Requests[2].Request.Method);
+        Assert.Contains(machineId.ToString(), handler.Requests[2].Request.RequestUri!.AbsolutePath);
+        Assert.Equal(machineId, machine.Id);
+        Assert.Equal(ValidationCode.TooManyMachines, validation.Code);
+        Assert.Equal(6, validation.License.MachinesCount);
+        Assert.Equal(5, validation.License.MaxMachines);
     }
 
     [Fact]

@@ -152,4 +152,80 @@ public class ProofTests
         var proof = MachineProof.Parse("v1x0.QUJD");
         Assert.Equal("QUJD", proof.RawSignatureBase64);
     }
+
+    /// <summary>
+    /// Regression test for the canonical-JSON escaping bug. System.Text.Json's default encoder is
+    /// an HTML-safety encoder: it escapes every non-ASCII character plus <c>+</c>, <c>&lt;</c>,
+    /// <c>&gt;</c>, <c>&amp;</c> and <c>'</c>. serde_json — which is what actually produced the
+    /// bytes the server signed — escapes only <c>"</c>, <c>\</c> and control characters. Any of
+    /// those characters anywhere in the payload therefore made this SDK reconstruct different
+    /// bytes and reject an authentic proof.
+    ///
+    /// The two values here are the realistic triggers: base64-shaped hardware fingerprints
+    /// routinely contain <c>+</c>, and dataset values carry user- or machine-supplied text.
+    /// </summary>
+    [Fact]
+    public void BuildSignedPayload_DoesNotHtmlEscape_PlusSignsOrNonAscii()
+    {
+        const string fingerprintWithPlus = "aB+cD/eF+gh=";
+        var dataset = new JsonObject { ["owner"] = "Necip Sünmaz", ["note"] = "a<b>c&d'e" };
+
+        var json = MachineProof.BuildSignedPayload(FixtureAccountId, FixtureMachineId, fingerprintWithPlus, dataset);
+
+        // Present literally, exactly as serde_json would have written them.
+        Assert.Contains(fingerprintWithPlus, json);
+        Assert.Contains("Necip Sünmaz", json);
+        Assert.Contains("a<b>c&d'e", json);
+
+        // And none of the \uXXXX escapes the default encoder would have emitted.
+        Assert.DoesNotContain("\\u002B", json);
+        Assert.DoesNotContain("\\u00FC", json);
+        Assert.DoesNotContain("\\u003C", json);
+        Assert.DoesNotContain("\\u0026", json);
+        Assert.DoesNotContain("\\u0027", json);
+    }
+
+    [Fact]
+    public void Verify_RoundTrips_ForAFingerprintWithAPlusAndANonAsciiDatasetValue()
+    {
+        // End-to-end form of the above: the server signs its own bytes, and this SDK has to
+        // reconstruct them exactly or every genuine proof fails to verify.
+        using var rsa = RSA.Create(2048);
+        const string fingerprintWithPlus = "aB+cD/eF+gh=";
+        var dataset = new JsonObject { ["owner"] = "Necip Sünmaz", ["tier"] = "prö" };
+
+        // Byte-for-byte what serde_json writes: keys sorted, no whitespace, and only ", \\ and
+        // control characters escaped.
+        var serverJson =
+            "{\"account\":{\"id\":\"" + FixtureAccountId + "\"},"
+            + "\"dataset\":{\"owner\":\"Necip Sünmaz\",\"tier\":\"prö\"},"
+            + "\"machine\":{\"fingerprint\":\"" + fingerprintWithPlus + "\",\"id\":\"" + FixtureMachineId + "\"}}";
+        var serverBytes = Encoding.UTF8.GetBytes(serverJson);
+        var signature = rsa.SignData(serverBytes, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var proof = MachineProof.Parse("v1x0." + Convert.ToBase64String(signature));
+
+        Assert.True(proof.Verify(rsa, FixtureAccountId, FixtureMachineId, fingerprintWithPlus, dataset));
+    }
+
+    [Fact]
+    public void BuildSignedPayload_OrdersDatasetKeysByUtf8Bytes_NotUtf16CodeUnits()
+    {
+        // StringComparer.Ordinal compares UTF-16 code units; BTreeMap<String, _> compares UTF-8
+        // bytes. These two keys are exactly where they disagree: U+FF21 is the single UTF-16 code
+        // unit 0xFF21, while U+1F600 is the surrogate pair 0xD83D 0xDE00 — so UTF-16 sorts the
+        // emoji FIRST (0xD83D < 0xFF21). UTF-8 is the other way round: U+FF21 encodes to EF BC A1
+        // and U+1F600 to F0 9F 98 80. serde_json writes the UTF-8 order, so that is the order the
+        // signature covers.
+        var dataset = new JsonObject
+        {
+            ["\U0001F600-emoji"] = 1,
+            ["Ａ-fullwidth"] = 2,
+        };
+
+        var json = MachineProof.BuildSignedPayload(FixtureAccountId, FixtureMachineId, FixtureFingerprint, dataset);
+
+        var fullwidthPos = json.IndexOf("-fullwidth", StringComparison.Ordinal);
+        var emojiPos = json.IndexOf("-emoji", StringComparison.Ordinal);
+        Assert.True(fullwidthPos < emojiPos, json);
+    }
 }

@@ -7,13 +7,26 @@ public sealed partial class TamgaClient
     // ---------------------------------------------------------------
     // §G Machine Management
     //
-    // GOTCHA: no machine/core/etc. limit is checked at machine creation time — those limits only
-    // surface later via license validation (§C). ActivateMachineAsync below implements the
-    // "create → validate → interpret over-limit codes → optionally delete" dance this requires.
+    // Machine/core/memory/disk limits are checked BOTH at creation time and by license validation
+    // (§C), and the two are not redundant. The create-time check runs through the policy's overage
+    // strategy, so under ALLOW_ACCESS / ALLOW_1_25X_OVERAGE the create still succeeds and the
+    // limit only surfaces at validate. ActivateMachineAsync below therefore keeps the full
+    // "create → validate → interpret over-limit codes → optionally delete" dance AND surfaces the
+    // create-time 422 path, normalized onto the same ValidationCode values.
     // ---------------------------------------------------------------
 
     /// <summary><c>POST /machines</c> — creates a machine. Required: <see cref="CreateMachineRequest.Fingerprint"/>, <see cref="CreateMachineRequest.LicenseId"/>.</summary>
-    /// <exception cref="FingerprintTakenException"><c>409 FINGERPRINT_TAKEN</c> — duplicate fingerprint on the same license.</exception>
+    /// <remarks>
+    /// Quota is enforced here, not only at validation time. Uniqueness is checked first, so
+    /// re-sending an already-activated fingerprint is reported as
+    /// <see cref="FingerprintTakenException"/> ("already activated, carry on") rather than as a
+    /// quota failure — do not tell the user to buy more seats on a <c>409</c>.
+    /// </remarks>
+    /// <exception cref="FingerprintTakenException"><c>409 FINGERPRINT_TAKEN</c> — the fingerprint is already activated within the policy's uniqueness scope (which may be a <em>different</em> license under <c>UNIQUE_PER_POLICY</c>/<c>UNIQUE_PER_ACCOUNT</c>).</exception>
+    /// <exception cref="MachineLimitExceededException"><c>422 MACHINE_LIMIT_EXCEEDED</c> — the license is at its machine limit under the policy's overage strategy.</exception>
+    /// <exception cref="CoreLimitExceededException"><c>422 CORE_LIMIT_EXCEEDED</c>.</exception>
+    /// <exception cref="MemoryLimitExceededException"><c>422 MEMORY_LIMIT_EXCEEDED</c> — remember <see cref="CreateMachineRequest.Memory"/> is in megabytes.</exception>
+    /// <exception cref="DiskLimitExceededException"><c>422 DISK_LIMIT_EXCEEDED</c> — remember <see cref="CreateMachineRequest.Disk"/> is in megabytes.</exception>
     public async Task<Machine> CreateMachineAsync(CreateMachineRequest request, CancellationToken cancellationToken = default)
     {
         var body = new JsonApiCreateRequest<MachineAttributes>
@@ -55,15 +68,42 @@ public sealed partial class TamgaClient
     /// <see cref="ValidationCode.TooManyCores"/>/<see cref="ValidationCode.TooMuchMemory"/>/
     /// <see cref="ValidationCode.TooMuchDisk"/>/<see cref="ValidationCode.TooManyProcesses"/>. On
     /// any of these, deletes the just-created machine when <paramref name="deleteOnOverLimit"/> is
-    /// <see langword="true"/> (the default) — there is no server-side limit check at creation time,
-    /// so the machine row exists even though the license is over its limit unless this SDK removes
-    /// it.
+    /// <see langword="true"/> (the default), because the machine row exists and is counted against
+    /// the license unless this SDK removes it.
     /// </summary>
+    /// <remarks>
+    /// There are TWO ways an activation can be over-limit, and a caller has to handle both:
+    ///
+    /// <list type="number">
+    /// <item>
+    /// <description>
+    /// <b>The create is refused outright</b> (<c>422</c>, e.g. <c>MACHINE_LIMIT_EXCEEDED</c>).
+    /// This method then throws a <see cref="TamgaLimitExceededException"/> and never reaches the
+    /// validate or delete steps — there is nothing to roll back, because nothing was created.
+    /// Read <see cref="TamgaLimitExceededException.EquivalentValidationCode"/> to get the same
+    /// <see cref="ValidationCode"/> path 2 would have reported.
+    /// </description>
+    /// </item>
+    /// <item>
+    /// <description>
+    /// <b>The create succeeds and validation reports the overage.</b> The server's create-time
+    /// check runs through the policy's overage strategy, so under <c>ALLOW_ACCESS</c> or
+    /// <c>ALLOW_1_25X_OVERAGE</c> the row is created and only <c>validate</c> objects. This is the
+    /// path <paramref name="deleteOnOverLimit"/> exists for, and it is still live — do not assume
+    /// path 1 replaced it.
+    /// </description>
+    /// </item>
+    /// </list>
+    /// </remarks>
+    /// <exception cref="TamgaLimitExceededException">The server refused the create itself — see path 1 above.</exception>
+    /// <exception cref="FingerprintTakenException">The fingerprint is already activated in the policy's uniqueness scope; the existing machine is untouched.</exception>
     public async Task<(Machine Machine, ValidationResult Validation)> ActivateMachineAsync(
         CreateMachineRequest request,
         bool deleteOnOverLimit = true,
         CancellationToken cancellationToken = default)
     {
+        // A create-time limit rejection propagates as-is: no machine row was written, so running
+        // the validate/delete rollback below would delete nothing and only obscure the cause.
         var machine = await CreateMachineAsync(request, cancellationToken).ConfigureAwait(false);
         var validation = await ValidateByIdAsync(request.LicenseId, cancellationToken: cancellationToken).ConfigureAwait(false);
 
@@ -91,6 +131,16 @@ public sealed partial class TamgaClient
     }
 
     /// <summary><c>POST /machines/{id}/actions/reset-heartbeat</c> — no body, fully rewinds heartbeat state to <see cref="HeartbeatStatus.NotStarted"/>. Returns the updated machine resource.</summary>
+    /// <remarks>
+    /// PERMISSIONS: this endpoint is role-gated, not permission-gated, and the license-key role is
+    /// not on the list (admin / developer / product token / environment token only). A client
+    /// configured with <see cref="AuthTransport.License"/> or
+    /// <see cref="AuthTransport.BasicLicense"/> therefore gets <c>403</c> from this call every
+    /// time. That matters because resetting is the only server-side way to unstick a machine whose
+    /// heartbeat job is wedged — so an embedded client cannot self-recover here, and should not
+    /// present this as a recovery action. Contrast <see cref="PingHeartbeatAsync"/>, which is
+    /// permission-gated and works fine on a license key.
+    /// </remarks>
     public async Task<Machine> ResetHeartbeatAsync(Guid machineId, CancellationToken cancellationToken = default)
     {
         var doc = await _transport.SendJsonApiAsync<MachineAttributes>(

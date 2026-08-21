@@ -34,17 +34,37 @@ public sealed partial class TamgaClient
             ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "Create component returned an empty body." });
     }
 
-    /// <summary><c>GET /machines/{id}/components</c> — keyset-paginated (<c>limit</c>/<c>page[after]</c>).</summary>
+    /// <summary>The server's maximum (and this SDK's default) page size for component listings — <c>limit</c> is clamped to <c>1..100</c> server-side.</summary>
+    private const int MaxComponentsPageSize = 100;
+
+    /// <summary><c>GET /machines/{id}/components</c> — keyset-paginated (<c>limit</c>/<c>page[after]</c>). Unlike entitlements, the cursor genuinely works here.</summary>
+    /// <param name="machineId">The machine whose components to list.</param>
+    /// <param name="limit">Page size, clamped to <c>1..100</c> server-side. Defaults to 100 (the maximum) rather than letting the server apply its silent default of 25.</param>
+    /// <param name="after">The <c>page[after]</c> cursor from a previous page's <see cref="Page{T}.NextCursor"/>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>
+    /// The cursor is synthesized from the last item's id when the page came back full, because the
+    /// server emits no <c>links</c> object to read one out of (see <see cref="JsonApiLinks"/>) —
+    /// page fullness measured against a known <c>limit</c> is the only available end-of-list
+    /// signal. That is also why an explicit <c>limit</c> is always sent: with the limit left
+    /// implicit there is no number to compare the row count against, and a listing would stop at
+    /// the server's default of 25 rows with no indication it had been cut short.
+    /// </remarks>
     public async Task<Page<Component>> ListComponentsAsync(Guid machineId, int? limit = null, string? after = null, CancellationToken cancellationToken = default)
     {
-        var query = BuildPaginationQuery(limit, after);
+        var effectiveLimit = limit ?? MaxComponentsPageSize;
+        var query = BuildPaginationQuery(effectiveLimit, after);
         var (body, response) = await _transport.SendRawAsync(
             HttpMethod.Get, $"/machines/{machineId}/components", query: query, cancellationToken: cancellationToken).ConfigureAwait(false);
         response.Dispose();
 
         var doc = JsonSerializer.Deserialize<FlatListDocument<Component>>(body, TamgaJsonOptions.Default)
             ?? throw new TamgaApiException(new TamgaApiError { Status = 200, Code = "EMPTY_RESPONSE", Detail = "List components returned an empty body." });
-        return new Page<Component> { Items = doc.Data, NextCursor = ExtractAfterCursor(doc.Links?.Next) };
+        return new Page<Component>
+        {
+            Items = doc.Data,
+            NextCursor = doc.Data.Count == effectiveLimit ? doc.Data[^1].Id.ToString() : null,
+        };
     }
 
     /// <summary>
@@ -92,29 +112,6 @@ public sealed partial class TamgaClient
         }
 
         return parts.Count == 0 ? null : string.Join('&', parts);
-    }
-
-    private static string? ExtractAfterCursor(string? nextLink)
-    {
-        if (string.IsNullOrEmpty(nextLink))
-        {
-            return null;
-        }
-
-        // `links.next` is a full URL/query fragment; pull the bare `page[after]` cursor value out
-        // of it rather than assuming it's already a bare cursor.
-        var queryStart = nextLink.IndexOf('?');
-        var query = queryStart >= 0 ? nextLink[(queryStart + 1)..] : nextLink;
-        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var kv = pair.Split('=', 2);
-            if (kv.Length == 2 && (kv[0] == "page[after]" || kv[0] == "page%5Bafter%5D"))
-            {
-                return Uri.UnescapeDataString(kv[1]);
-            }
-        }
-
-        return null;
     }
 }
 

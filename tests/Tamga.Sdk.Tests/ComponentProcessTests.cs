@@ -78,40 +78,80 @@ public class ComponentProcessTests
         Assert.Equal(processId, process.Id);
     }
 
+    // The real wire shape: `data` only. The server passes `links: None` on every serializer and
+    // the field is skip_serializing_if none, so no response ever carries a `links` key — which is
+    // why the cursor has to be synthesized from the last item of a full page instead.
+    private static string ComponentListBody(Guid machineId, params Guid[] ids) => new JsonObject
+    {
+        ["data"] = new JsonArray(ids
+            .Select(id => (JsonNode)new JsonObject
+            {
+                ["id"] = id.ToString(),
+                ["machine_id"] = machineId.ToString(),
+                ["fingerprint"] = $"fp-{id}",
+                ["name"] = "cpu",
+            })
+            .ToArray()),
+    }.ToJsonString();
+
     [Fact]
-    public async Task ListComponentsAsync_ThreadsKeysetPaginationCursor_AcrossMultiplePages()
+    public async Task ListComponentsAsync_SynthesizesTheCursorFromTheLastItemOfAFullPage()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
-        var componentId1 = Guid.NewGuid();
-        var componentId2 = Guid.NewGuid();
+        var ids = Enumerable.Range(0, 3).Select(_ => Guid.NewGuid()).ToArray();
 
-        var page1Body = new JsonObject
-        {
-            ["data"] = new JsonArray
-            {
-                new JsonObject { ["id"] = componentId1.ToString(), ["machine_id"] = machineId.ToString(), ["fingerprint"] = "fp-1", ["name"] = "cpu" },
-            },
-            ["links"] = new JsonObject { ["next"] = "/machines/x/components?page%5Bafter%5D=cursor-1" },
-        }.ToJsonString();
-        var page2Body = new JsonObject
-        {
-            ["data"] = new JsonArray
-            {
-                new JsonObject { ["id"] = componentId2.ToString(), ["machine_id"] = machineId.ToString(), ["fingerprint"] = "fp-2", ["name"] = "ram" },
-            },
-            ["links"] = new JsonObject(),
-        }.ToJsonString();
-        handler.Enqueue(HttpStatusCode.OK, page1Body, contentType: "application/json");
-        handler.Enqueue(HttpStatusCode.OK, page2Body, contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, ids), contentType: "application/json");
 
-        var page1 = await client.ListComponentsAsync(machineId);
-        Assert.Single(page1.Items);
-        Assert.Equal("cursor-1", page1.NextCursor);
+        var page = await client.ListComponentsAsync(machineId, limit: 3);
 
-        var page2 = await client.ListComponentsAsync(machineId, after: page1.NextCursor);
-        Assert.Single(page2.Items);
-        Assert.Null(page2.NextCursor);
-        Assert.Contains("page%5Bafter%5D=cursor-1", handler.Requests[1].Request.RequestUri!.Query);
+        Assert.Equal(3, page.Items.Count);
+        Assert.Equal(ids[^1].ToString(), page.NextCursor);
+        Assert.Contains("limit=3", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsNoCursor_OnAPartialPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()), contentType: "application/json");
+
+        var page = await client.ListComponentsAsync(machineId, limit: 3);
+
+        Assert.Single(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_SendsAnExplicitLimit_SoAFullPageIsDetectable()
+    {
+        // With the limit left implicit the server applies its own default of 25 and there is no
+        // number to compare the row count against, so a truncated listing looks complete.
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()), contentType: "application/json");
+
+        await client.ListComponentsAsync(machineId);
+
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ThreadsTheSynthesizedCursorBackAsPageAfter()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        var first = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, first), contentType: "application/json");
+        handler.Enqueue(HttpStatusCode.OK, ComponentListBody(machineId, Guid.NewGuid()), contentType: "application/json");
+
+        var page1 = await client.ListComponentsAsync(machineId, limit: 1);
+        Assert.Equal(first.ToString(), page1.NextCursor);
+
+        await client.ListComponentsAsync(machineId, limit: 1, after: page1.NextCursor);
+        Assert.Contains($"page%5Bafter%5D={first}", handler.Requests[1].Request.RequestUri!.Query);
     }
 }

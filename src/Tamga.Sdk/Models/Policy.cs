@@ -314,20 +314,45 @@ public static class PolicyStrategies
     /// <summary>Wire value for <see cref="Policy.ExpirationStrategy"/>: access is always allowed, regardless of expiry.</summary>
     public const string AllowAccess = "ALLOW_ACCESS";
 
+    /// <summary>
+    /// Wire value for <see cref="Policy.ExpirationStrategy"/>: the credential itself is revoked at
+    /// expiry. The one expiration strategy that changes authentication rather than validation.
+    /// </summary>
+    /// <remarks>
+    /// Under <see cref="RestrictAccess"/>, <see cref="MaintainAccess"/> and
+    /// <see cref="AllowAccess"/> an expired license still authenticates and validation answers
+    /// <see cref="ValidationCode.Expired"/>. Under this strategy — and under any unrecognized
+    /// value, which fails closed the same way — license-key auth is refused outright with
+    /// <c>401 LICENSE_EXPIRED</c> (<see cref="LicenseExpiredException"/>), before any endpoint
+    /// logic runs.
+    /// </remarks>
+    public const string RevokeAccess = "REVOKE_ACCESS";
+
     /// <summary>Wire value for <see cref="Policy.RenewalBasis"/>: renewal extends from the current expiry date.</summary>
     public const string FromExpiry = "FROM_EXPIRY";
 
     /// <summary>Wire value for <see cref="Policy.RenewalBasis"/>: renewal extends from the current time.</summary>
     public const string FromNow = "FROM_NOW";
 
-    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: token-based authentication.</summary>
+    /// <summary>
+    /// Wire value for <see cref="Policy.AuthenticationStrategy"/>: token-based authentication.
+    /// This is the server's column DEFAULT, and it REFUSES license keys — see
+    /// <see cref="Policy.AuthenticationStrategy"/>.
+    /// </summary>
     public const string Token = "TOKEN";
 
-    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: license-key-based authentication.</summary>
+    /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: license-key-based authentication. One of the two values that let this SDK's primary transport work at all.</summary>
     public const string License = "LICENSE";
 
     /// <summary>Wire value for <see cref="Policy.AuthenticationStrategy"/>: both token and license-key authentication.</summary>
     public const string Mixed = "MIXED";
+
+    /// <summary>
+    /// Wire value for <see cref="Policy.AuthenticationStrategy"/>: no authentication strategy
+    /// selected. At the license-key auth gate this behaves exactly like <see cref="Token"/> —
+    /// the key is refused — it does NOT mean "auth is off".
+    /// </summary>
+    public const string None = "NONE";
 }
 
 /// <summary>
@@ -403,7 +428,12 @@ public sealed record Policy
     [JsonConverter(typeof(HeartbeatResurrectionStrategyConverter))]
     public HeartbeatResurrectionStrategy HeartbeatResurrectionStrategy { get; init; }
 
-    /// <summary>Free text, no backing enum — see <see cref="PolicyStrategies"/> for well-known values. Server default is <see cref="PolicyStrategies.RestrictAccess"/>.</summary>
+    /// <summary>Free text, no backing enum — see <see cref="PolicyStrategies"/> for the four well-known values. Server default is <see cref="PolicyStrategies.RestrictAccess"/>.</summary>
+    /// <remarks>
+    /// <see cref="PolicyStrategies.RevokeAccess"/> is the only value that stops an expired license
+    /// from authenticating at all; the other three let it in and report
+    /// <see cref="ValidationCode.Expired"/> from validation instead.
+    /// </remarks>
     [JsonPropertyName("expiration_strategy")]
     public string? ExpirationStrategy { get; init; }
 
@@ -411,7 +441,20 @@ public sealed record Policy
     [JsonPropertyName("renewal_basis")]
     public string? RenewalBasis { get; init; }
 
-    /// <summary>Free text, no backing enum — see <see cref="PolicyStrategies"/>. Server default is <see cref="PolicyStrategies.Token"/>.</summary>
+    /// <summary>
+    /// Free text, no backing enum — see <see cref="PolicyStrategies"/> for the four well-known
+    /// values. Server default is <see cref="PolicyStrategies.Token"/>. This is the field that
+    /// decides whether this SDK's primary credential works at all.
+    /// </summary>
+    /// <remarks>
+    /// The server accepts an <c>Authorization: License &lt;key&gt;</c> credential only when this is
+    /// <see cref="PolicyStrategies.License"/> or <see cref="PolicyStrategies.Mixed"/>. Everything
+    /// else — including <see cref="PolicyStrategies.Token"/>, the column default, and
+    /// <see cref="PolicyStrategies.None"/>, which despite the name does not mean "auth is off" —
+    /// answers <c>401 LICENSE_NOT_ALLOWED</c> (<see cref="LicenseNotAllowedException"/>). So
+    /// license-key auth is off by default: a freshly created policy rejects it until someone
+    /// changes this field. Retrying or re-issuing the key cannot fix it.
+    /// </remarks>
     [JsonPropertyName("authentication_strategy")]
     public string? AuthenticationStrategy { get; init; }
 

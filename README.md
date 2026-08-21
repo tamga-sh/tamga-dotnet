@@ -215,9 +215,10 @@ server's `> 0 && <= 31536000` range check
   (`TamgaTransport.RetryDelay`), preferring a parsed `Retry-After` capped at
   60 seconds (`TamgaTransport.ParseRetryAfter`). Auto-retry is scoped to
   `GET` plus five safe `POST` actions — `validate`, `validate-key`,
-  `check-in`, `check-out`, `ping` (`TamgaTransport.IsRetryable`). Creates are
-  deliberately excluded, because a repeated `POST /machines` can burn a second
-  seat. Set `TamgaClientOptions.MaxRetries` to `0` to handle `429` yourself.
+  `check-in`, `check-out`, `ping`, `ping-heartbeat`, `reset-heartbeat`
+  (`TamgaTransport.IsRetryable`). Creates are deliberately excluded, because a
+  repeated `POST /machines` can burn a second seat. Set
+  `TamgaClientOptions.MaxRetries` to `0` to handle `429` yourself.
 
 Vulnerability reporting and the full threat model live in
 [SECURITY.md](SECURITY.md).
@@ -227,18 +228,58 @@ Vulnerability reporting and the full threat model live in
 Behaviors of the current server that a consumer of this SDK needs to plan
 around:
 
-- **Auth is not enforced server-side** on the license or machine endpoints
-  today. This SDK still always sends the configured `Auth` transport, so no
-  change is needed once enforcement lands.
-- **Only 14 of the 24 `ValidationCode` values are reachable.** `NotFound` is
+- **License-key auth is off by default.** The server accepts an
+  `Authorization: License <key>` credential only when the license's policy has
+  `authentication_strategy` set to `LICENSE` or `MIXED` — and that column
+  defaults to `TOKEN`. Against a default policy every call answers
+  `401 LICENSE_NOT_ALLOWED` (`LicenseNotAllowedException`). That is a
+  configuration precondition, not a transient failure: retrying or re-issuing
+  the key will not help, the policy has to be changed. Suspended licenses
+  (`401 LICENSE_SUSPENDED`) and expired licenses under a `REVOKE_ACCESS` policy
+  (`401 LICENSE_EXPIRED`) are refused at the same front door, before any
+  per-endpoint check runs.
+- **16 of the 24 `ValidationCode` values are reachable.** `NotFound` is
   modeled but never emitted (the server returns HTTP 404 directly instead),
-  and `Banned`, `EntitlementsMissing`, `TooManyUsers`, `HeartbeatDead`,
-  `HeartbeatNotStarted`, `FingerprintScopeMismatch`, `ComponentsScopeMismatch`,
-  `ChecksumScopeMismatch` and `VersionScopeMismatch` exist for
-  forward-compatibility only. Do not build UX around them.
-- **`Scope` is only partly enforced.** `Product`, `Policy`, `User` and
-  `Environment` constrain validation; `Entitlements`, `Fingerprint`,
-  `Version` and `Checksum` are accepted and silently ignored.
+  and `Banned`, `TooManyUsers`, `HeartbeatDead`, `HeartbeatNotStarted`,
+  `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and `VersionScopeMismatch`
+  exist for forward-compatibility only. Do not build UX around those.
+  `EntitlementsMissing` and `FingerprintScopeMismatch` **are** reachable now —
+  see the next entry.
+- **`Scope`: six fields enforced, two rejected.** `Product`, `Policy`, `User`,
+  `Environment`, `Entitlements` and `Fingerprint` all constrain validation.
+  `Entitlements` takes entitlement **codes** (not the UUIDs the attach/detach
+  bodies use), matched case-insensitively against the union of directly-attached
+  and policy-inherited entitlements; `Fingerprint` matches any machine on the
+  license regardless of heartbeat status. `Version` and `Checksum` are no longer
+  ignored — sending either makes the server fail the entire validate call with
+  `422 SCOPE_NOT_SUPPORTED`, so this SDK marks them `[Obsolete]` and never puts
+  them on the wire.
+- **Machine `Memory` and `Disk` are MEGABYTES, not bytes.** The server stores
+  and quota-checks these columns in megabytes. Reporting 16 GB as
+  `17179869184` instead of `16384` inflates the license's running total by a
+  factor of 1,048,576 and trips `MEMORY_LIMIT_EXCEEDED` on the next activation
+  against that license.
+- **Activation limits are enforced at creation time too**, not only by a later
+  validation. `POST /machines` can fail with `422 MACHINE_LIMIT_EXCEEDED` /
+  `CORE_` / `MEMORY_` / `DISK_LIMIT_EXCEEDED`, surfaced as
+  `TamgaLimitExceededException` subclasses whose `EquivalentValidationCode`
+  gives the matching `ValidationCode`. The create-time check runs through the
+  policy's overage strategy, so under `ALLOW_ACCESS`/`ALLOW_1_25X_OVERAGE` the
+  create still succeeds and the limit surfaces only at validate — which is why
+  `ActivateMachineAsync` keeps its create→validate→rollback path as well.
+- **`GET /licenses/{id}/entitlements` cannot be paginated.** It returns a union
+  of direct and policy-inherited rows, so the server ignores `page[after]` on
+  this route; `limit` (max 100) is the only bound. `Page.NextCursor` is always
+  `null` here, and a license with more than 100 effective entitlements cannot be
+  enumerated in full — so a `false` from `HasEntitlementAsync` is authoritative
+  only below that ceiling. Component listings are unaffected: their cursor
+  genuinely works.
+- **Quick-validate skips its `last_validated_at` write when the request carries
+  an `Origin` header**, and the response is byte-identical either way.
+  `AuthTransport.Cookie` is the one transport this SDK sends `Origin` on, so
+  `QuickValidateAsync` transparently uses `POST .../actions/validate` instead
+  when it is configured. A proxy that adds `Origin` to another transport
+  defeats that; use `ValidateByIdAsync` if that is a risk.
 - **A fresh policy can report enum strings that are not real variants**
   (`overage_strategy: "DENY_ACCESS"`, `heartbeat_resurrection_strategy:
   "NO_RESURRECTION"`). The server treats both as the no-restriction case, and
@@ -247,6 +288,13 @@ around:
 - **`Policy.HeartbeatDuration` does not drive the heartbeat window.** The
   server uses a hardcoded 600 seconds. `HeartbeatScheduler` defaults to about
   a third of that; do not derive an interval from the policy field.
+- **`ResetHeartbeatAsync` and `GenerateOfflineProofAsync` always `403` on a
+  license key.** Both are role-gated (admin / developer / product token /
+  environment token, plus sales/support agents for proofs) rather than
+  permission-gated, and the license-key role is not on either list — even though
+  it holds `machine.proofs.generate`. `PingHeartbeatAsync` is permission-gated
+  and works fine. This matters most for reset: it is the only server-side way to
+  unstick a wedged heartbeat job, so an embedded client cannot self-recover.
 - **`Policy.MaxMemory` and `Policy.MaxDisk` are absent from `GET` responses**
   even though both are enforced during validation, so they cannot be
   introspected client-side — only observed as `TooMuchMemory`/`TooMuchDisk`
@@ -255,9 +303,15 @@ around:
   certificate: the call is not idempotent.
 - **`X-RateLimit-*` response headers are not parsed**, because the server
   never actually sets them.
-- **Auto-update and release-checking are not implemented.** The server-side
-  endpoint is non-functional and there is no artifact-download endpoint, so
-  this SDK exposes no update-check method.
+- **Auto-update and release-checking are not implemented here** — but the
+  server-side endpoint does work, contrary to what earlier versions of this
+  section claimed. `GET /v1/accounts/{id}/releases/actions/upgrade` is a live,
+  public handler: it answers `204 No Content` when the caller is already
+  current, and a `releases` resource otherwise. Omitting `constraint` defaults
+  to patch-only (`~x.y.z`); omitting `channel` matches **every** channel,
+  including `alpha` and `dev`. An artifact-download route exists too, though it
+  is currently behind a permission that no role holds. None of this is exposed
+  by this SDK yet — it is a missing feature, not a blocked one.
 
 ## Documentation
 

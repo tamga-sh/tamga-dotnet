@@ -78,11 +78,11 @@ public sealed record MachineAttributes
     [JsonPropertyName("cores")]
     public int? Cores { get; init; }
 
-    /// <summary>The machine's memory size, in bytes.</summary>
+    /// <summary>The machine's memory size, in MEGABYTES — see <see cref="CreateMachineRequest.Memory"/>.</summary>
     [JsonPropertyName("memory")]
     public long? Memory { get; init; }
 
-    /// <summary>The machine's disk size, in bytes.</summary>
+    /// <summary>The machine's disk size, in MEGABYTES — see <see cref="CreateMachineRequest.Disk"/>.</summary>
     [JsonPropertyName("disk")]
     public long? Disk { get; init; }
 
@@ -135,10 +135,10 @@ public sealed record Machine
     /// <summary>The number of CPU cores reported by the machine.</summary>
     public int? Cores { get; init; }
 
-    /// <summary>The machine's memory size, in bytes.</summary>
+    /// <summary>The machine's memory size, in MEGABYTES — see <see cref="CreateMachineRequest.Memory"/>.</summary>
     public long? Memory { get; init; }
 
-    /// <summary>The machine's disk size, in bytes.</summary>
+    /// <summary>The machine's disk size, in MEGABYTES — see <see cref="CreateMachineRequest.Disk"/>.</summary>
     public long? Disk { get; init; }
 
     /// <summary>The machine's current heartbeat status.</summary>
@@ -153,7 +153,16 @@ public sealed record Machine
     /// <summary>When the machine was last checked out (offline <c>.machine</c> file issued).</summary>
     public DateTimeOffset? LastCheckOutAt { get; init; }
 
-    /// <summary>The ID of the license this machine is activated against.</summary>
+    /// <summary>
+    /// The ID of the license this machine is activated against — in practice always
+    /// <see langword="null"/> on a server response.
+    /// </summary>
+    /// <remarks>
+    /// The server's machine serializer emits only <c>{ type, id, attributes }</c>;
+    /// <c>relationships</c> appears on the machine CREATE request body but never on any response,
+    /// so there is nothing for this to be read from. Track the license id you activated with on
+    /// your own side.
+    /// </remarks>
     public Guid? LicenseId { get; init; }
 
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
@@ -208,10 +217,18 @@ public sealed record CreateMachineRequest
     /// <summary>The number of CPU cores to report for the machine.</summary>
     public int? Cores { get; init; }
 
-    /// <summary>The machine's memory size, in bytes.</summary>
+    /// <summary>The machine's memory size, in MEGABYTES.</summary>
+    /// <remarks>
+    /// MEGABYTES, not bytes. The server stores this column in megabytes and rolls it straight into
+    /// the license's running <c>machines_memory_count</c>, which is what the
+    /// <c>MEMORY_LIMIT_EXCEEDED</c> check measures. Reporting 16 GB as <c>17179869184</c> instead
+    /// of <c>16384</c> inflates that total by a factor of 1,048,576 and locks the license out of
+    /// its next activation — see <see cref="MemoryLimitExceededException"/>.
+    /// </remarks>
     public long? Memory { get; init; }
 
-    /// <summary>The machine's disk size, in bytes.</summary>
+    /// <summary>The machine's disk size, in MEGABYTES.</summary>
+    /// <remarks>MEGABYTES, not bytes — same units and same failure mode as <see cref="Memory"/>.</remarks>
     public long? Disk { get; init; }
 
     /// <summary>Arbitrary caller-supplied metadata to attach to the machine.</summary>

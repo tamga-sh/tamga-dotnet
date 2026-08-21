@@ -23,15 +23,27 @@ using var client = new TamgaClient(new TamgaClientOptions
 {
     AccountId = accountId,
     BaseUrl = baseUrl,
+    // PREREQUISITE: license-key auth only works if the license's POLICY has
+    // authentication_strategy set to LICENSE or MIXED. That column defaults to 'TOKEN', which
+    // rejects license keys, so a freshly created policy answers 401 LICENSE_NOT_ALLOWED here — a
+    // configuration problem, not a bad key. Fix the policy; retrying will not help.
     Auth = new AuthTransport.License(licenseKey),
 });
 
 try
 {
-    // ActivateMachineAsync handles the "no server-side limit check at creation time" gotcha:
-    // it creates the machine, validates the license, and deletes the machine again if validation
-    // comes back over-limit (TooManyMachines/TooManyCores/TooMuchMemory/TooMuchDisk/
-    // TooManyProcesses) — deleteOnOverLimit defaults to true.
+    // An over-limit activation can fail in two different places, and both are live:
+    //
+    //  1. The CREATE is refused outright with a 422 — caught below as TamgaLimitExceededException.
+    //     Nothing was created, so there is nothing to roll back.
+    //  2. The create SUCCEEDS and validation reports the overage. The server's create-time check
+    //     honours the policy's overage strategy, so under ALLOW_ACCESS / ALLOW_1_25X_OVERAGE the
+    //     machine row is written and only validate objects. That is what deleteOnOverLimit (true
+    //     by default) cleans up: create → validate → delete on
+    //     TooManyMachines/TooManyCores/TooMuchMemory/TooMuchDisk/TooManyProcesses.
+    //
+    // Note Memory/Disk on CreateMachineRequest are MEGABYTES, not bytes — passing bytes inflates
+    // the license's running total by 1,048,576x and locks out the next activation.
     var (machine, validation) = await client.ActivateMachineAsync(new CreateMachineRequest
     {
         Fingerprint = fingerprint,
@@ -64,7 +76,21 @@ try
 }
 catch (FingerprintTakenException)
 {
-    Console.Error.WriteLine("This fingerprint is already registered for this license.");
+    // "Already activated, carry on" — NOT a reason to tell the user to buy more seats. The server
+    // checks uniqueness before quota precisely so a re-activation is reported this way.
+    Console.Error.WriteLine("This fingerprint is already registered within the policy's uniqueness scope.");
+    return 1;
+}
+catch (TamgaLimitExceededException ex)
+{
+    // Path 1: the create itself was refused. EquivalentValidationCode normalizes it onto the same
+    // ValidationCode a later validate would have reported, so both over-limit paths converge.
+    Console.Error.WriteLine($"Activation refused at creation ({ex.Error.Code} / {ex.EquivalentValidationCode}): {ex.Error.Detail}");
+    return 1;
+}
+catch (LicenseNotAllowedException)
+{
+    Console.Error.WriteLine("This license's policy does not permit license-key auth (authentication_strategy must be LICENSE or MIXED).");
     return 1;
 }
 catch (TamgaApiException ex)

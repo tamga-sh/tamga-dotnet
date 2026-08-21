@@ -22,10 +22,11 @@ public class EntitlementTests
         ["attributes"] = new JsonObject { ["name"] = name, ["code"] = code },
     };
 
-    private static string ListBody(JsonObject item, string? nextLink = null) => new JsonObject
+    // The real wire shape: `data` only. Every server serializer passes `links: None`, and the
+    // field is skip_serializing_if none, so no response the API can produce has a `links` key.
+    private static string ListBody(params JsonObject[] items) => new JsonObject
     {
-        ["data"] = new JsonArray { item },
-        ["links"] = nextLink is null ? new JsonObject() : new JsonObject { ["next"] = nextLink },
+        ["data"] = new JsonArray(items.Cast<JsonNode>().ToArray()),
     }.ToJsonString();
 
     [Fact]
@@ -44,21 +45,69 @@ public class EntitlementTests
     }
 
     [Fact]
-    public async Task ListEntitlementsAsync_ThreadsKeysetPaginationCursor_AcrossMultiplePages()
+    public async Task ListEntitlementsAsync_NeverReportsANextCursor_BecauseTheRouteIgnoresPageAfter()
     {
+        // The server unions direct and policy-inherited rows here, so it dropped its keyset
+        // cursor: `page[after]` is accepted for wire compatibility and then ignored. Reporting a
+        // NextCursor would invite a loop that re-fetches page one forever.
         var (client, handler) = MakeClient();
         var licenseId = Guid.NewGuid();
 
-        handler.Enqueue(HttpStatusCode.OK, ListBody(EntitlementResource(Guid.NewGuid(), "A", "code-a"), "/licenses/x/entitlements?page%5Bafter%5D=cursor-1"));
-        handler.Enqueue(HttpStatusCode.OK, ListBody(EntitlementResource(Guid.NewGuid(), "B", "code-b")));
+        var full = Enumerable.Range(0, 100)
+            .Select(i => EntitlementResource(Guid.NewGuid(), $"E{i}", $"code-{i}"))
+            .ToArray();
+        handler.Enqueue(HttpStatusCode.OK, ListBody(full));
 
-        var page1 = await client.ListEntitlementsAsync(licenseId);
-        Assert.Single(page1.Items);
-        Assert.Equal("cursor-1", page1.NextCursor);
+        var page = await client.ListEntitlementsAsync(licenseId);
 
-        var page2 = await client.ListEntitlementsAsync(licenseId, after: page1.NextCursor);
-        Assert.Single(page2.Items);
-        Assert.Null(page2.NextCursor);
+        Assert.Equal(100, page.Items.Count);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
+    public async Task ListEntitlementsAsync_SendsAnExplicitLimitOf100_RatherThanTakingTheServersSilentDefaultOf25()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, ListBody(EntitlementResource(Guid.NewGuid(), "A", "code-a")));
+
+        await client.ListEntitlementsAsync(Guid.NewGuid());
+
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task GetCachedEntitlements_IssuesExactlyOneRequest_AtTheServerMaximum()
+    {
+        // The old cursor loop exited after one iteration with no explicit limit, silently capping
+        // the cache at the server's default of 25 rows — and caching that truncation with no TTL,
+        // so HasEntitlementAsync answered a permanent false for everything past row 25.
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+
+        var full = Enumerable.Range(0, 100)
+            .Select(i => EntitlementResource(Guid.NewGuid(), $"E{i}", $"code-{i}"))
+            .ToArray();
+        handler.Enqueue(HttpStatusCode.OK, ListBody(full));
+
+        Assert.True(await client.HasEntitlementAsync(licenseId, "code-99"));
+        Assert.Single(handler.Requests);
+        Assert.Contains("limit=100", handler.Requests[0].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListEntitlementsAsync_SurfacesTheInheritedFlag()
+    {
+        var (client, handler) = MakeClient();
+        var direct = EntitlementResource(Guid.NewGuid(), "Direct", "code-direct");
+        var inherited = EntitlementResource(Guid.NewGuid(), "Inherited", "code-inherited");
+        inherited["attributes"]!["inherited"] = true;
+        direct["attributes"]!["inherited"] = false;
+        handler.Enqueue(HttpStatusCode.OK, ListBody(direct, inherited));
+
+        var page = await client.ListEntitlementsAsync(Guid.NewGuid());
+
+        Assert.False(page.Items[0].Inherited);
+        Assert.True(page.Items[1].Inherited);
     }
 
     [Fact]

@@ -14,11 +14,19 @@ public static class Ecdsa
     private const string P256Oid = "1.2.840.10045.3.1.7";
 
     /// <summary>
-    /// Verifies an ECDSA P-256/SHA-256 signature over raw <c>(r, s)</c> concatenated bytes
-    /// (<see cref="DSASignatureFormat.IeeeP1363FixedFieldConcatenation"/> — the conventional wire
-    /// format for this scheme, as opposed to DER-encoded ASN.1).
+    /// Verifies an ECDSA P-256/SHA-256 signature in ASN.1 DER form
+    /// (<see cref="DSASignatureFormat.Rfc3279DerSequence"/> — a <c>SEQUENCE { r INTEGER,
+    /// s INTEGER }</c>), which is what the server produces.
     /// </summary>
     /// <remarks>
+    /// FORMAT: the server signs with <c>ECDSA_P256_SHA256_ASN1_SIGNING</c>, so the signature on
+    /// the wire is DER, not the raw <c>(r, s)</c> concatenation of
+    /// <see cref="DSASignatureFormat.IeeeP1363FixedFieldConcatenation"/>. Verifying with the wrong
+    /// format does not throw — it simply returns <see langword="false"/> for every genuine
+    /// signature, which is a silent, total verification failure that looks exactly like a forged
+    /// file. This branch is latent today (no write path sets a license's <c>scheme</c>, so every
+    /// machine file is currently Ed25519), but it turns on the moment that column is populated.
+    ///
     /// SECURITY: <paramref name="publicKey"/>'s curve is whatever the caller constructed it with —
     /// when built via <c>ImportSubjectPublicKeyInfo</c> (the machine-file path), the curve comes
     /// from the input bytes' own embedded OID. Without checking it here, a validly-signed message
@@ -32,6 +40,6 @@ public static class Ecdsa
         {
             return false;
         }
-        return publicKey.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        return publicKey.VerifyData(message, signature, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
     }
 }

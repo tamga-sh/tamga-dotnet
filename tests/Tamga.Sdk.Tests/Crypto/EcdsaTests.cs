@@ -13,7 +13,7 @@ public class EcdsaTests
     {
         using var ecdsa = CreateKey();
         var message = "machine file payload"u8.ToArray();
-        var signature = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var signature = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
 
         Assert.True(Ecdsa.Verify(ecdsa, message, signature));
     }
@@ -23,7 +23,7 @@ public class EcdsaTests
     {
         using var ecdsa = CreateKey();
         var message = "machine file payload"u8.ToArray();
-        var signature = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var signature = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
 
         Assert.False(Ecdsa.Verify(ecdsa, "tampered payload"u8.ToArray(), signature));
     }
@@ -34,7 +34,7 @@ public class EcdsaTests
         using var ecdsaP256 = CreateKey();
         using var ecdsaOther = ECDsa.Create(ECCurve.NamedCurves.nistP384);
         var message = "curve confusion check"u8.ToArray();
-        var signature = ecdsaOther.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var signature = ecdsaOther.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
 
         Assert.False(Ecdsa.Verify(ecdsaP256, message, signature));
     }
@@ -58,7 +58,7 @@ public class EcdsaTests
     {
         using var ecdsaP384 = ECDsa.Create(ECCurve.NamedCurves.nistP384); // deliberately NOT P-256
         var message = "tamga-dotnet ecdsa curve-confusion regression test"u8.ToArray();
-        var signature = ecdsaP384.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+        var signature = ecdsaP384.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
 
         Assert.False(Ecdsa.Verify(ecdsaP384, message, signature));
     }
@@ -74,8 +74,29 @@ public class EcdsaTests
     public void Verify_ReturnsFalse_ForWrongLengthSignature()
     {
         using var ecdsa = CreateKey();
-        var tooShort = new byte[3]; // P-256 IEEE P1363 signatures are always 64 bytes
+        var tooShort = new byte[3]; // far too short to be a DER SEQUENCE { r, s }
 
         Assert.False(Ecdsa.Verify(ecdsa, "machine file payload"u8.ToArray(), tooShort));
+    }
+
+    /// <summary>
+    /// Regression test for the signature-encoding mismatch: the server signs with
+    /// <c>ECDSA_P256_SHA256_ASN1_SIGNING</c>, so the wire format is ASN.1 DER, but this verifier
+    /// was asking the BCL for IEEE P1363 raw <c>(r, s)</c>. That combination does not throw — it
+    /// returns false for every genuine signature, which is a total silent verification failure
+    /// indistinguishable from a forged file. Latent only because no server write path currently
+    /// sets a license's <c>scheme</c>, so every machine file today is Ed25519.
+    /// </summary>
+    [Fact]
+    public void Verify_AcceptsTheServersDerEncoding_AndRejectsRawP1363()
+    {
+        using var ecdsa = CreateKey();
+        var message = "tamga machine file payload"u8.ToArray();
+
+        var der = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+        var raw = ecdsa.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+
+        Assert.True(Ecdsa.Verify(ecdsa, message, der));
+        Assert.False(Ecdsa.Verify(ecdsa, message, raw));
     }
 }

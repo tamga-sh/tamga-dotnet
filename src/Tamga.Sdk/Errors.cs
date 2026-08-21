@@ -1,4 +1,5 @@
 using System.Text.Json.Serialization;
+using Tamga.Sdk.Models;
 
 namespace Tamga.Sdk;
 
@@ -22,6 +23,14 @@ public sealed record TamgaApiError
     public string? Id { get; init; }
 
     /// <summary>The HTTP status code associated with this error.</summary>
+    /// <remarks>
+    /// The server sends this as a JSON <em>string</em> (<c>"status": "422"</c>), not a number.
+    /// Binding it to a <see cref="ushort"/> only works because
+    /// <see cref="TamgaJsonOptions.Default"/> sets
+    /// <see cref="System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString"/> —
+    /// deserialize this type with any other options and the whole envelope will throw. Prefer
+    /// <see cref="Code"/> for dispatch regardless; the status only narrows the class of failure.
+    /// </remarks>
     [JsonPropertyName("status")]
     public ushort Status { get; init; }
 
@@ -64,6 +73,19 @@ public class TamgaApiException : Exception
 {
     /// <summary>The parsed API error that caused this exception.</summary>
     public TamgaApiError Error { get; }
+
+    /// <summary>
+    /// The failure that stopped the server's error envelope from binding, when
+    /// <see cref="Error"/> had to be recovered from the raw response body instead.
+    /// <see langword="null"/> on the normal path.
+    /// </summary>
+    /// <remarks>
+    /// Exists so a malformed envelope is diagnosable rather than silent. It used to be swallowed
+    /// outright, and the recovery path then overwrote the server's <c>code</c> with the HTTP
+    /// status name — so the one thing a caller could dispatch on was destroyed and the reason was
+    /// gone too. This is diagnostic only: dispatch on <see cref="TamgaApiError.Code"/>.
+    /// </remarks>
+    public Exception? ErrorBodyParseFailure { get; internal set; }
 
     /// <summary>Constructs from a parsed API error.</summary>
     public TamgaApiException(TamgaApiError error)
@@ -239,6 +261,139 @@ public sealed class TamgaInternalServerErrorException : TamgaApiException
 }
 
 /// <summary>
+/// Base type for the <c>422</c> quota rejections the server raises at <em>creation</em> time —
+/// machine activation and process spawn.
+/// </summary>
+/// <remarks>
+/// These used to be reported only by a later <c>validate</c> call, which a client is free never to
+/// make, so nothing actually stopped an over-limit activation. The server now checks the quota
+/// inside the create transaction, which means <c>POST /machines</c> and <c>POST /processes</c> can
+/// fail outright with a limit code instead of succeeding and leaving the overage for validation to
+/// discover.
+///
+/// The two paths are not redundant, and neither replaces the other: the create-time check runs
+/// through the policy's overage strategy, so under <c>ALLOW_ACCESS</c> or
+/// <c>ALLOW_1_25X_OVERAGE</c> the create still succeeds and the limit surfaces only at validate.
+/// <see cref="EquivalentValidationCode"/> normalizes the two so a caller can dispatch on one value
+/// whichever path it arrived by — see <see cref="TamgaClient.ActivateMachineAsync"/>.
+/// </remarks>
+public class TamgaLimitExceededException : TamgaApiException
+{
+    /// <summary>The <see cref="ValidationCode"/> a later <c>validate</c> call would report for this same overage.</summary>
+    public ValidationCode EquivalentValidationCode { get; }
+
+    /// <summary>Constructs from a parsed API error and the validate-time code it corresponds to.</summary>
+    public TamgaLimitExceededException(TamgaApiError error, ValidationCode equivalentValidationCode)
+        : base(error)
+        => EquivalentValidationCode = equivalentValidationCode;
+}
+
+/// <summary><c>422 MACHINE_LIMIT_EXCEEDED</c> — machine activation refused at creation time. Validate-time equivalent: <see cref="ValidationCode.TooManyMachines"/>.</summary>
+public sealed class MachineLimitExceededException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public MachineLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooManyMachines) { }
+}
+
+/// <summary><c>422 CORE_LIMIT_EXCEEDED</c> — CPU-core quota refused at creation time. Validate-time equivalent: <see cref="ValidationCode.TooManyCores"/>.</summary>
+public sealed class CoreLimitExceededException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public CoreLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooManyCores) { }
+}
+
+/// <summary>
+/// <c>422 MEMORY_LIMIT_EXCEEDED</c> — memory quota refused at creation time. Validate-time
+/// equivalent: <see cref="ValidationCode.TooMuchMemory"/>.
+/// </summary>
+/// <remarks>
+/// The quota is counted in <em>megabytes</em>. A caller that reports 16 GB as
+/// <c>17179869184</c> instead of <c>16384</c> inflates the license's running total by a factor of
+/// 1,048,576 and trips this on the next activation against the same license — see
+/// <see cref="Models.CreateMachineRequest.Memory"/>.
+/// </remarks>
+public sealed class MemoryLimitExceededException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public MemoryLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooMuchMemory) { }
+}
+
+/// <summary>
+/// <c>422 DISK_LIMIT_EXCEEDED</c> — disk quota refused at creation time. Validate-time equivalent:
+/// <see cref="ValidationCode.TooMuchDisk"/>. Counted in megabytes, same as
+/// <see cref="MemoryLimitExceededException"/>.
+/// </summary>
+public sealed class DiskLimitExceededException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public DiskLimitExceededException(TamgaApiError error) : base(error, ValidationCode.TooMuchDisk) { }
+}
+
+/// <summary><c>422 TOO_MANY_PROCESSES</c> — <c>POST /processes</c> refused: the license is at its <c>max_processes</c> limit. Validate-time equivalent: <see cref="ValidationCode.TooManyProcesses"/>.</summary>
+public sealed class TooManyProcessesException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public TooManyProcessesException(TamgaApiError error) : base(error, ValidationCode.TooManyProcesses) { }
+}
+
+/// <summary>
+/// <c>401 LICENSE_SUSPENDED</c> — license-key authentication refused because the license is
+/// suspended. Raised at the front door, before any per-endpoint check, so every call on that
+/// credential fails this way.
+/// </summary>
+/// <remarks>Not retryable: it clears only when the license is reinstated, which this SDK's credential cannot do.</remarks>
+public sealed class LicenseSuspendedException : TamgaLicenseAuthException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public LicenseSuspendedException(TamgaApiError error) : base(error) { }
+}
+
+/// <summary>
+/// <c>401 LICENSE_EXPIRED</c> — license-key authentication refused because the license has expired
+/// <em>and</em> its policy's <c>expiration_strategy</c> is <c>REVOKE_ACCESS</c> (or an unrecognized
+/// value, which fails closed).
+/// </summary>
+/// <remarks>
+/// Under <c>MAINTAIN_ACCESS</c>, <c>ALLOW_ACCESS</c> and <c>RESTRICT_ACCESS</c> an expired license
+/// still authenticates — validation answers <see cref="ValidationCode.Expired"/> instead. So this
+/// exception says something narrower than "the license expired": it says the policy chose to
+/// revoke the credential outright.
+/// </remarks>
+public sealed class LicenseExpiredException : TamgaLicenseAuthException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public LicenseExpiredException(TamgaApiError error) : base(error) { }
+}
+
+/// <summary>
+/// <c>401 LICENSE_NOT_ALLOWED</c> — license-key authentication is not permitted for this license's
+/// policy.
+/// </summary>
+/// <remarks>
+/// This is a configuration precondition, not a transient auth failure: the server accepts a
+/// license key only when the policy's <c>authentication_strategy</c> is <c>LICENSE</c> or
+/// <c>MIXED</c>, and that column defaults to <c>'TOKEN'</c>. A freshly created policy therefore
+/// rejects <see cref="AuthTransport.License"/>/<see cref="AuthTransport.BasicLicense"/> out of the
+/// box. Retrying cannot help; the policy has to be changed.
+/// </remarks>
+public sealed class LicenseNotAllowedException : TamgaLicenseAuthException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public LicenseNotAllowedException(TamgaApiError error) : base(error) { }
+}
+
+/// <summary>
+/// Base type for the <c>401</c> refusals raised by license-key authentication itself, so a caller
+/// can catch every "this credential cannot be used" case in one clause without enumerating the
+/// specific codes.
+/// </summary>
+public abstract class TamgaLicenseAuthException : TamgaApiException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    protected TamgaLicenseAuthException(TamgaApiError error) : base(error) { }
+}
+
+/// <summary>
 /// Maps a parsed <see cref="TamgaApiError"/> to its typed exception. Dispatch is on
 /// <see cref="TamgaApiError.Code"/> only.
 /// </summary>
@@ -267,6 +422,14 @@ public static class TamgaErrorMapper
         "LICENSE_KEY_MISSING" => new LicenseKeyMissingException(error),
         "SCHEME_NOT_SUPPORTED" => new SchemeNotSupportedException(error),
         "DATASET_INVALID" => new DatasetInvalidException(error),
+        "MACHINE_LIMIT_EXCEEDED" => new MachineLimitExceededException(error),
+        "CORE_LIMIT_EXCEEDED" => new CoreLimitExceededException(error),
+        "MEMORY_LIMIT_EXCEEDED" => new MemoryLimitExceededException(error),
+        "DISK_LIMIT_EXCEEDED" => new DiskLimitExceededException(error),
+        "TOO_MANY_PROCESSES" => new TooManyProcessesException(error),
+        "LICENSE_SUSPENDED" => new LicenseSuspendedException(error),
+        "LICENSE_EXPIRED" => new LicenseExpiredException(error),
+        "LICENSE_NOT_ALLOWED" => new LicenseNotAllowedException(error),
         "NOT_FOUND" => new TamgaNotFoundException(error),
         "UNAUTHORIZED" => new TamgaUnauthorizedException(error),
         "FORBIDDEN" => new TamgaForbiddenException(error),

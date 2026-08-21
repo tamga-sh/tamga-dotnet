@@ -220,7 +220,9 @@ public class MachineFileTests
                 {
                     var ecdsa = ECDsa.Create(ECCurve.NamedCurves.nistP256);
                     var publicKey = ecdsa.ExportSubjectPublicKeyInfo();
-                    return (publicKey, msg => ecdsa.SignData(msg, HashAlgorithmName.SHA256, DSASignatureFormat.IeeeP1363FixedFieldConcatenation), "base64+ecdsa-p256");
+                    // DER, matching the server's ECDSA_P256_SHA256_ASN1_SIGNING — a fixture
+                    // signed as raw P1363 would test the SDK against itself, not the server.
+                    return (publicKey, msg => ecdsa.SignData(msg, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence), "base64+ecdsa-p256");
                 }
 
             default:

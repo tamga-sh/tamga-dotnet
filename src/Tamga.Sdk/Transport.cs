@@ -28,7 +28,13 @@ public sealed class TamgaClientOptions
     public string ApiVersion { get; init; } = "1";
 
     /// <summary>Request timeout applied to an internally-constructed <see cref="HttpClient"/>. Ignored when an external <see cref="HttpClient"/> is supplied to <see cref="TamgaClient"/>.</summary>
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(30);
+    /// <remarks>
+    /// Deliberately longer than the server's own 30s request timeout. At exactly 30s the two race,
+    /// and a slow request usually surfaced as a local <see cref="TaskCanceledException"/> instead
+    /// of the server's <c>504</c> — which is the response that carries the <c>X-Request-Id</c> a
+    /// support ticket needs. Sitting outside the server's deadline means the server's answer wins.
+    /// </remarks>
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(45);
 
     /// <summary>
     /// How many times a rate-limited (<c>429</c>) request is retried before giving up.
@@ -215,18 +221,26 @@ public sealed record JsonApiCreateRequest<TAttributes>
 }
 
 /// <summary>The <c>links</c> object on a keyset-paginated JSON:API list response.</summary>
+/// <remarks>
+/// GOTCHA: the server never emits this. Every serializer builds its document with
+/// <c>links: None</c> and the field is <c>skip_serializing_if = "Option::is_none"</c>, so no
+/// response the API can produce carries a <c>links</c> key at all. Kept for wire-shape
+/// completeness and source compatibility only — <see cref="Next"/> is always
+/// <see langword="null"/>, and nothing in this SDK derives a pagination cursor from it. See
+/// <c>TamgaClient</c>'s listing methods for how the cursor is actually synthesized.
+/// </remarks>
 public sealed record JsonApiLinks
 {
-    /// <summary>The URL of the next page, or <see langword="null"/> if this is the last page.</summary>
+    /// <summary>Always <see langword="null"/> — the server emits no <c>links</c> object. See the type-level remarks.</summary>
     [JsonPropertyName("next")]
     public string? Next { get; init; }
 }
 
 /// <summary>
 /// The JSON:API envelope for a keyset-paginated list endpoint (e.g. entitlements, components):
-/// <c>{ data: [...], links: { next } }</c>. The <c>page[after]</c> cursor for the next page is
-/// parsed out of <see cref="Links"/>.<c>Next</c> by the caller (see <c>TamgaClient</c>'s listing
-/// methods), since it arrives as a full URL/query fragment rather than a bare cursor value.
+/// <c>{ data: [...] }</c>. <see cref="Links"/> is modeled but never populated by the server (see
+/// <see cref="JsonApiLinks"/>), so the <c>page[after]</c> cursor is synthesized from the last item
+/// of a full page instead — see <c>TamgaClient</c>'s listing methods.
 /// </summary>
 public sealed record JsonApiListDocument<TAttributes>
 {
@@ -238,7 +252,7 @@ public sealed record JsonApiListDocument<TAttributes>
     [JsonPropertyName("meta")]
     public JsonElement? Meta { get; init; }
 
-    /// <summary>Pagination/navigation links for the list response.</summary>
+    /// <summary>Always <see langword="null"/> — the server emits no <c>links</c> object. See <see cref="JsonApiLinks"/>.</summary>
     [JsonPropertyName("links")]
     public JsonApiLinks? Links { get; init; }
 
@@ -249,8 +263,19 @@ public sealed record JsonApiListDocument<TAttributes>
 
 /// <summary>
 /// Shared <see cref="JsonSerializerOptions"/> for every request/response body in this SDK: nulls
-/// omitted on serialize, case-insensitive property matching on deserialize.
+/// omitted on serialize, case-insensitive property matching on deserialize, and numbers accepted
+/// from JSON strings on deserialize.
 /// </summary>
+/// <remarks>
+/// CRITICAL — <see cref="JsonNumberHandling.AllowReadingFromString"/> is load-bearing, not a
+/// nicety. The server serializes a JSON:API error's <c>status</c> as a <em>string</em>
+/// (<c>status.as_u16().to_string()</c>), so the wire shape is <c>"status": "422"</c>, not
+/// <c>"status": 422</c>. Without this flag, <see cref="TamgaApiError.Status"/>
+/// (a <see cref="ushort"/>) fails to bind, the whole <see cref="TamgaApiErrorEnvelope"/>
+/// deserialization throws, and <see cref="TamgaErrorMapper.ToException"/> is never reached — every
+/// typed exception in this SDK becomes unreachable and every API error degrades to a bare
+/// <see cref="TamgaApiException"/> whose <c>code</c> is the HTTP status name. Do not remove it.
+/// </remarks>
 public static class TamgaJsonOptions
 {
     /// <summary>The shared <see cref="JsonSerializerOptions"/> instance used for (de)serializing Tamga API payloads.</summary>
@@ -258,6 +283,7 @@ public static class TamgaJsonOptions
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         PropertyNameCaseInsensitive = true,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString,
     };
 }
 
@@ -394,9 +420,16 @@ public sealed class TamgaTransport
     private const int MaxRetryAfterSeconds = 60;
 
     /// <summary>
-    /// The five <c>POST</c> action suffixes that are safe to repeat after a <c>429</c> — see
+    /// The seven <c>POST</c> action suffixes that are safe to repeat after a <c>429</c> — see
     /// <see cref="IsRetryable"/> for why these and nothing else.
     /// </summary>
+    /// <remarks>
+    /// <c>/actions/ping-heartbeat</c> and <c>/actions/reset-heartbeat</c> are listed explicitly:
+    /// neither ends with <c>/actions/ping</c> (that suffix is the <em>process</em> ping route), so
+    /// both were silently excluded and a throttled heartbeat was dropped — which is exactly how a
+    /// machine gets culled. Both are bare idempotent state writes server-side
+    /// (<c>UPDATE … SET last_heartbeat_at = NOW()</c>), so repeating them cannot burn a seat.
+    /// </remarks>
     private static readonly string[] RetryablePostSuffixes =
     [
         "/actions/validate",
@@ -404,6 +437,8 @@ public sealed class TamgaTransport
         "/actions/check-in",
         "/actions/check-out",
         "/actions/ping",
+        "/actions/ping-heartbeat",
+        "/actions/reset-heartbeat",
     ];
 
     /// <summary>Is this request safe to repeat after a <c>429</c>?</summary>
@@ -603,8 +638,23 @@ public sealed class TamgaTransport
         }
     }
 
+    /// <summary>
+    /// Parses a JSON:API error envelope and maps its first error to a typed exception, degrading
+    /// as little as possible when the body is not the envelope this SDK expects.
+    /// </summary>
+    /// <remarks>
+    /// The fallback path used to overwrite the server's <c>code</c> with the HTTP status name
+    /// (<c>"UnprocessableEntity"</c>), destroying the only stable value a caller can dispatch on —
+    /// and it did so silently, so a malformed envelope was indistinguishable from a well-formed
+    /// one this SDK simply could not bind. Now the server's own <c>code</c>/<c>detail</c> are
+    /// recovered from the raw body whenever they are present at all, the synthesized code is
+    /// clearly marked (<c>UNPARSEABLE_ERROR_BODY</c>) when they are not, and the underlying
+    /// <see cref="JsonException"/> is preserved as the exception's
+    /// <see cref="Exception.InnerException"/> instead of being swallowed.
+    /// </remarks>
     private static TamgaApiException ParseAndMapError(string body, System.Net.HttpStatusCode status)
     {
+        JsonException? parseFailure = null;
         try
         {
             var envelope = JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(body, TamgaJsonOptions.Default);
@@ -614,12 +664,66 @@ public sealed class TamgaTransport
                 return TamgaErrorMapper.ToException(first);
             }
         }
-        catch (JsonException)
+        catch (JsonException ex)
         {
-            // fall through to the generic error below
+            parseFailure = ex;
         }
 
-        return new TamgaApiException(new TamgaApiError { Status = (ushort)status, Code = status.ToString(), Detail = body });
+        var recovered = RecoverErrorFieldsFromRawBody(body);
+        var error = new TamgaApiError
+        {
+            Status = (ushort)status,
+            Code = recovered.Code ?? "UNPARSEABLE_ERROR_BODY",
+            Detail = recovered.Detail ?? body,
+        };
+
+        // Still map through the typed mapper: a recovered `code` is exactly as dispatchable as one
+        // that bound cleanly, and degrading it to the base type would cost the caller the very
+        // thing the recovery was for.
+        var mapped = TamgaErrorMapper.ToException(error);
+        mapped.ErrorBodyParseFailure = parseFailure;
+        return mapped;
+    }
+
+    /// <summary>
+    /// Last-ditch recovery of <c>code</c>/<c>detail</c> from an error body that would not bind to
+    /// <see cref="TamgaApiErrorEnvelope"/> — walks the raw JSON document instead of the typed
+    /// envelope, so a single unexpected field elsewhere in the payload cannot cost the caller the
+    /// server's stable error code.
+    /// </summary>
+    private static (string? Code, string? Detail) RecoverErrorFieldsFromRawBody(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty("errors", out var errors)
+                || errors.ValueKind != JsonValueKind.Array
+                || errors.GetArrayLength() == 0)
+            {
+                return (null, null);
+            }
+
+            var first = errors[0];
+            if (first.ValueKind != JsonValueKind.Object)
+            {
+                return (null, null);
+            }
+
+            var code = first.TryGetProperty("code", out var codeElement) && codeElement.ValueKind == JsonValueKind.String
+                ? codeElement.GetString()
+                : null;
+            var detail = first.TryGetProperty("detail", out var detailElement) && detailElement.ValueKind == JsonValueKind.String
+                ? detailElement.GetString()
+                : null;
+            return (code, detail);
+        }
+        catch (JsonException)
+        {
+            // The body is not JSON at all (e.g. the bare `axum::extract::Query` rejection on the
+            // upgrade-check route answers plain text). Nothing to recover.
+            return (null, null);
+        }
     }
 
     /// <summary>Reads the standard response headers this SDK surfaces (<c>Tamga-Version</c>, <c>Tamga-Edition</c>, <c>Tamga-Mode</c>, <c>X-Request-Id</c>).</summary>

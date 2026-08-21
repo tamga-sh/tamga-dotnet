@@ -18,6 +18,16 @@ public sealed partial class TamgaClient
     /// parsing the returned <c>meta.proof</c> (<c>"v1x0.&lt;base64 signature&gt;"</c>) into a
     /// <see cref="MachineProof"/>. <paramref name="dataset"/> defaults to an empty object.
     /// </summary>
+    /// <remarks>
+    /// PERMISSIONS: this endpoint is role-gated, and the license-key role is not on the list —
+    /// despite holding the <c>machine.proofs.generate</c> permission, which the role gate is
+    /// checked independently of. A client configured with <see cref="AuthTransport.License"/> or
+    /// <see cref="AuthTransport.BasicLicense"/> gets <c>403</c> here every time; generating a proof
+    /// needs an admin, developer, product, environment, sales-agent or support-agent credential.
+    /// Verification (<see cref="MachineProof.Verify"/>) is purely local and has no such
+    /// restriction, so the usual split is: generate server-side with a privileged credential, ship
+    /// the proof to the embedded client, verify there.
+    /// </remarks>
     /// <exception cref="DatasetInvalidException"><c>422 DATASET_INVALID</c> — the server rejected <paramref name="dataset"/>.</exception>
     /// <exception cref="ArgumentException"><paramref name="dataset"/> is a non-null <see cref="JsonNode"/> that isn't a JSON object (e.g. an array or a scalar value) — the wire contract is <c>{ "meta": { "dataset": {...} } }</c>, an object.</exception>
     public async Task<MachineProof> GenerateOfflineProofAsync(

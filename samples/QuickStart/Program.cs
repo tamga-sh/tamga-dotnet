@@ -18,6 +18,11 @@ using var client = new TamgaClient(new TamgaClientOptions
     BaseUrl = baseUrl,
     // License auth is the primary transport for embedded/client SDKs like this one — see the
     // README's auth-transport matrix for the other 7 options.
+    //
+    // PREREQUISITE: this only works if the license's POLICY has authentication_strategy set to
+    // LICENSE or MIXED. That column defaults to 'TOKEN', which rejects license keys, so a
+    // freshly created policy answers 401 LICENSE_NOT_ALLOWED here — a configuration problem, not
+    // a bad key. Fix the policy; retrying will not help.
     Auth = new AuthTransport.License(licenseKey),
 });
 
@@ -25,7 +30,7 @@ try
 {
     var result = await client.ValidateByKeyAsync(licenseKey);
 
-    // Only 14 of ValidationCode's 24 values are reachable today — see the README's "Known gaps"
+    // 16 of ValidationCode's 24 values are reachable today — see the README's "Known gaps"
     // section before building UX around the rest.
     switch (result.Code)
     {
