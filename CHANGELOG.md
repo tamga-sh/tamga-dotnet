@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.0](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.3...v2.1.0) (2026-08-21)
+
+
+### Features
+
+* read back the x-ratelimit-* headers the server has been sending all along ([fcf85d2](https://github.com/tamga-sh/tamga-dotnet/commit/fcf85d22ccd7a23dd56be9c0feb61439cd021a81))
+* remove the five phantom relationship ids announced for removal in 2.0.0 ([5e7a718](https://github.com/tamga-sh/tamga-dotnet/commit/5e7a71828cf8e555e81adb14f84e51af0c0823e5))
+* surface the rate-limit headers and remove the announced phantom ids ([ea42588](https://github.com/tamga-sh/tamga-dotnet/commit/ea425884ac19b72dcbcbea1843a3c0d2a6fdfe62))
+
 ## [2.0.3](https://github.com/tamga-sh/tamga-dotnet/compare/v2.0.2...v2.0.3) (2026-08-21)
 
 
