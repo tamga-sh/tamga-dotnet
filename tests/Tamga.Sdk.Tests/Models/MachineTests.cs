@@ -19,12 +19,13 @@ public class MachineTests
     }
 
     /// <summary>
-    /// <c>Machine.LicenseId</c> is dead for the same reason <c>License</c>'s four relationship ids
-    /// are: the server's machine serializer emits <c>{ type, id, attributes }</c> and nothing else.
-    /// <c>relationships</c> exists on the machine CREATE <em>request</em> body only, never on a
-    /// response, so the property could never have been populated from a real read. It is kept and
-    /// marked <c>[Obsolete]</c> only because deleting a public member is source-breaking; the
-    /// mapper no longer pretends to read it.
+    /// The mapper must ignore <c>relationships</c> outright rather than bind anything from it. The
+    /// server's machine serializer emits <c>{ type, id, attributes }</c> and nothing else;
+    /// <c>relationships</c> exists on the machine CREATE <em>request</em> body only. A
+    /// <c>Machine.LicenseId</c> property used to be populated from it — always
+    /// <see langword="null"/> in practice, <c>[Obsolete]</c> from 2.0.0, removed in 2.1.0. This
+    /// test feeds the mapper a hand-built relationships object no server could send and pins that
+    /// the surviving fields still bind and nothing throws.
     /// </summary>
     [Fact]
     public void Machine_FromResource_IgnoresRelationships_BecauseTheServerNeverSendsAny()
@@ -47,10 +48,6 @@ public class MachineTests
         Assert.Equal(machineId, machine.Id);
         Assert.Equal("fp-1", machine.Fingerprint);
         Assert.Equal(HeartbeatStatus.Alive, machine.HeartbeatStatus);
-
-#pragma warning disable CS0618 // the point of the test is that this obsolete member stays null
-        Assert.Null(machine.LicenseId);
-#pragma warning restore CS0618
     }
 
     [Theory]

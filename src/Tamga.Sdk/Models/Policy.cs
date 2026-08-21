@@ -401,10 +401,25 @@ public static class PolicyStrategies
 /// </para>
 /// <para>
 /// The two properties that go the other way — <see cref="MaxMemory"/> and <see cref="MaxDisk"/> —
-/// are NOT on the server's response even though both are enforced during validation. They are
-/// always <see langword="null"/> after <see cref="FromResource"/>; the limits can only be observed
-/// as <see cref="ValidationCode.TooMuchMemory"/>/<see cref="ValidationCode.TooMuchDisk"/> on a
-/// failed validation.
+/// are NOT on the server's response even though both are enforced during validation. The columns
+/// exist and are read by the validator (<c>policies/model.rs:187-188</c>, used at <c>:302</c> and
+/// <c>:309</c>), but <c>policies/serializer.rs</c> does not project them: it emits
+/// <c>max_machines</c> and <c>max_cores</c> and stops (<c>:45-46</c>, <c>:83-84</c>). They are
+/// therefore always <see langword="null"/> after <see cref="FromResource"/>, and the limits can
+/// only be observed as <see cref="ValidationCode.TooMuchMemory"/>/
+/// <see cref="ValidationCode.TooMuchDisk"/> on a failed validation.
+/// </para>
+/// <para>
+/// They are nevertheless KEPT, and deliberately not <c>[Obsolete]</c>. Unlike the relationship ids
+/// removed from <see cref="License"/> and <see cref="Machine"/> in 2.1.0 — which had no wire
+/// binding at all and could not have been populated by any server — these two are ordinary
+/// <c>[JsonPropertyName]</c> bindings on a type that is deserialized straight from
+/// <c>attributes</c>. The day the serializer projects the columns it already has, they light up
+/// with no SDK change. That is the same reason <see cref="MaxUsers"/> and
+/// <c>HeartbeatScheduler.Dead</c> are kept: a member the server has not implemented yet is not a
+/// deprecated member, and marking it <c>[Obsolete]</c> would fire <c>CS0618</c> in every consumer
+/// build — an error, not a warning, under the <c>TreatWarningsAsErrors</c> this repo and many of
+/// its consumers use — for a property that may become correct on its own.
 /// </para>
 /// <para>
 /// No <c>relationships</c> object exists on this resource either (no serializer in the API emits
@@ -473,11 +488,19 @@ public sealed record Policy
     [JsonPropertyName("max_users")]
     public int? MaxUsers { get; init; }
 
-    /// <summary>Not present on the server's GET response even though it is enforced — see type-level remarks.</summary>
+    /// <summary>
+    /// The maximum memory allowed under this policy. Always <see langword="null"/> today: enforced
+    /// server-side but never projected by the policy serializer — see type-level remarks for why
+    /// this is modelled anyway rather than removed.
+    /// </summary>
     [JsonPropertyName("max_memory")]
     public int? MaxMemory { get; init; }
 
-    /// <summary>Not present on the server's GET response even though it is enforced — see type-level remarks.</summary>
+    /// <summary>
+    /// The maximum disk allowed under this policy. Always <see langword="null"/> today: enforced
+    /// server-side but never projected by the policy serializer — see type-level remarks for why
+    /// this is modelled anyway rather than removed.
+    /// </summary>
     [JsonPropertyName("max_disk")]
     public int? MaxDisk { get; init; }
 

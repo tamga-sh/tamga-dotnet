@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -354,6 +355,45 @@ public sealed class TamgaTransport
 
     /// <summary>Response headers surfaced from the most recently completed request, if any were present.</summary>
     public sealed record ResponseHeaders(string? TamgaVersion, string? TamgaEdition, string? TamgaMode, string? RequestId);
+
+    /// <summary>
+    /// The <c>x-ratelimit-*</c> response headers, read off a response that carried them. A
+    /// deliberately separate type from <see cref="ResponseHeaders"/>, which is a positional record
+    /// whose shape cannot be extended without changing its constructor and <c>Deconstruct</c>
+    /// signatures.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The rate-limit middleware sets all four of these on the response it returns
+    /// (<c>shared/rate_limit/middleware.rs:140-143</c>), on the throttled <c>429</c> and on the
+    /// request it lets through alike, and all four are in the CORS expose list
+    /// (<c>router.rs:123-126</c>) so a browser client can read them too. Until 2026-08-21 this SDK
+    /// documented them as declared-but-never-set; that was wrong.
+    /// </para>
+    /// <para>
+    /// Every member is nullable and every one can legitimately be <see langword="null"/>: the
+    /// middleware returns early without setting anything when the server has no rate limiter
+    /// configured (<c>state.rate_limiter</c> is an <c>Option</c> that is <c>None</c> whenever the
+    /// Redis pool could not be built), and it also skips <c>OPTIONS</c> preflight. Absent is
+    /// therefore NOT the same as exhausted — check <see cref="IsPresent"/> before reading
+    /// <see cref="Remaining"/> as a budget, or a client on an unlimited server reads "0 left".
+    /// </para>
+    /// </remarks>
+    /// <param name="Limit">Bucket capacity for the matched route — <c>x-ratelimit-limit</c>. Auth-accepting routes get a tighter budget than everything else.</param>
+    /// <param name="Remaining">Requests left in the current window — <c>x-ratelimit-remaining</c>. Floored at 0 server-side, so it never goes negative.</param>
+    /// <param name="Reset">When the window resets, as an ABSOLUTE Unix time in seconds — <c>x-ratelimit-reset</c>. Not a delay: the server computes it as <c>now + ttl</c>. Use <see cref="ResetAt"/> rather than treating this as a duration, and use <c>Retry-After</c> (already honoured by the transport's own backoff) when what you want is how long to wait.</param>
+    /// <param name="Window">Window length in seconds — <c>x-ratelimit-window</c>. Currently always <c>1</c>: the per-second figure is the refill rate and the burst allowance is the capacity.</param>
+    public sealed record RateLimitInfo(long? Limit, long? Remaining, long? Reset, long? Window)
+    {
+        /// <summary>
+        /// <see langword="true"/> when the response carried at least one <c>x-ratelimit-*</c>
+        /// header — i.e. a rate limiter is actually running in front of this server.
+        /// </summary>
+        public bool IsPresent => Limit is not null || Remaining is not null || Reset is not null || Window is not null;
+
+        /// <summary><see cref="Reset"/> as a point in time, or <see langword="null"/> when the header was absent or unparseable.</summary>
+        public DateTimeOffset? ResetAt => Reset is { } reset ? DateTimeOffset.FromUnixTimeSeconds(reset) : null;
+    }
 
     private Uri BuildUri(string path, string? query)
     {
@@ -872,8 +912,44 @@ public sealed class TamgaTransport
         response.Headers.TryGetValues("Tamga-Mode", out var m) ? m.FirstOrDefault() : null,
         response.Headers.TryGetValues("X-Request-Id", out var r) ? r.FirstOrDefault() : null);
 
-    // GOTCHA: no X-RateLimit-* response header parsing here — those headers are declared in the
-    // server's CORS allowlist only, never actually set on a response by any handler, so there is
-    // nothing to read. This says nothing about 429 itself, which IS returned and IS handled: see
-    // SendWithRetryAsync/IsRetryable/RetryDelay/ParseRetryAfter above.
+    /// <summary>
+    /// Reads the <c>x-ratelimit-*</c> response headers (<c>limit</c>, <c>remaining</c>,
+    /// <c>reset</c>, <c>window</c>) off a response.
+    /// </summary>
+    /// <remarks>
+    /// Deliberately a second accessor rather than four more members on
+    /// <see cref="ReadResponseHeaders"/>'s <see cref="ResponseHeaders"/>: that type is a positional
+    /// record, so widening it would change its primary constructor and its <c>Deconstruct</c>
+    /// signature — a break for every caller that constructs or deconstructs one, in service of
+    /// values that come from a different middleware and are absent under different conditions.
+    /// <para>
+    /// A missing or non-numeric header becomes <see langword="null"/>, never an exception: this is
+    /// diagnostic metadata and follows the same rule as <see cref="ReadResponseHeaders"/>. Parsing
+    /// is invariant-culture and refuses a sign or any other decoration, so a malformed value reads
+    /// as absent rather than as a plausible-looking wrong number.
+    /// </para>
+    /// <para>
+    /// Reading these is separate from surviving a <c>429</c>, which the transport already handles
+    /// on its own: see <c>SendWithRetryAsync</c>/<c>IsRetryable</c>/<c>RetryDelay</c>/
+    /// <c>ParseRetryAfter</c> above. Use this to pace ahead of the limit, not to recover from it.
+    /// </para>
+    /// </remarks>
+    public static RateLimitInfo ReadRateLimitInfo(HttpResponseMessage response) => new(
+        ReadHeaderAsInt64(response, "x-ratelimit-limit"),
+        ReadHeaderAsInt64(response, "x-ratelimit-remaining"),
+        ReadHeaderAsInt64(response, "x-ratelimit-reset"),
+        ReadHeaderAsInt64(response, "x-ratelimit-window"));
+
+    private static long? ReadHeaderAsInt64(HttpResponseMessage response, string name)
+    {
+        if (!response.Headers.TryGetValues(name, out var values))
+        {
+            return null;
+        }
+
+        var raw = values.FirstOrDefault();
+        return long.TryParse(raw, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
+            ? parsed
+            : null;
+    }
 }

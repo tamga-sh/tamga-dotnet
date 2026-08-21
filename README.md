@@ -370,7 +370,10 @@ around:
   license regardless of heartbeat status. `Version` and `Checksum` are no longer
   ignored — sending either makes the server fail the entire validate call with
   `422 SCOPE_NOT_SUPPORTED`, so this SDK marks them `[Obsolete]` and never puts
-  them on the wire.
+  them on the wire. They are scheduled for removal in the next **major** — not
+  the 2.1.0 minor that removed the phantom relationship ids, because their
+  obsolete messages carried no removal notice through any shipped release. 2.1.0
+  adds that notice; the removal follows it.
 - **Machine `Memory` and `Disk` are MEGABYTES, not bytes.** The server stores
   and quota-checks these columns in megabytes. Reporting 16 GB as
   `17179869184` instead of `16384` inflates the license's running total by a
@@ -478,11 +481,14 @@ around:
   is ever culled** and a machine can sit at `DEAD` indefinitely with its row and
   its seat still there. A later ping revives it.
 - **No response carries a `relationships` object.** Every serializer emits
-  `{ type, id, attributes }` only, on licenses and machines alike, so
-  `License.ProductId`/`PolicyId`/`UserId`/`EnvironmentId` and `Machine.LicenseId`
-  can never be populated from a read. All five are `[Obsolete]` and always
-  `null`; track the ids you activated with yourself, or use the dedicated
+  `{ type, id, attributes }` only, on licenses and machines alike, so nothing on
+  a licence or machine read links it to its product, policy, owner or
+  environment. Five properties used to claim otherwise — `License.ProductId`/
+  `PolicyId`/`UserId`/`EnvironmentId` and `Machine.LicenseId` — and always
+  answered `null`. They were `[Obsolete]` from 2.0.0 and **removed in 2.1.0**.
+  Track the ids you activated with yourself, or use the dedicated
   `GET /licenses/{id}/product` · `/policy` · `/owner` routes.
+  `CreateMachineRequest.LicenseId` is a live request field and is unaffected.
 - **`ResetHeartbeatAsync` and `GenerateOfflineProofAsync` always `403` on a
   license key.** Both are role-gated (admin / developer / product token /
   environment token, plus sales/support agents for proofs) rather than
@@ -493,8 +499,13 @@ around:
 - **`Policy.MaxMemory` and `Policy.MaxDisk` are absent from `GET` responses**
   even though both are enforced during validation, so they cannot be
   introspected client-side — only observed as `TooMuchMemory`/`TooMuchDisk`
-  on a failed validation. Every one of the other 30 policy attributes the
-  serializer emits is now modelled; 14 of them were silently missing before.
+  on a failed validation. They are modelled anyway and were deliberately kept
+  when the phantom relationship ids were removed in 2.1.0: unlike those, these
+  are real wire bindings on a type deserialized straight from `attributes`, so
+  they start working with no SDK change the day the server's policy serializer
+  projects the two columns it already has. Every one of the other 30 policy
+  attributes the serializer emits is modelled; 14 of them were silently missing
+  before.
 - **`GetPolicyAsync` always `403`s on a license key; `GetLicensePolicyAsync` does
   not.** `GET /policies/{id}` is gated on the `policy.read` permission, which is
   not in the `LicenseToken` role's set — no policy setting turns it on.
@@ -542,8 +553,17 @@ around:
   `policy.require_heartbeat` is set, which is not the default.
 - **Checkout `includes` is always empty**, and each checkout mints a fresh
   certificate: the call is not idempotent.
-- **`X-RateLimit-*` response headers are not parsed**, because the server
-  never actually sets them.
+- **`x-ratelimit-*` response headers ARE set, and are read back** — this README
+  said the opposite until 2.1.0. The rate-limit middleware attaches all four
+  (`limit`, `remaining`, `reset`, `window`) to the response it returns, on the
+  request it lets through as well as on the `429` it refuses. Read them with
+  `TamgaTransport.ReadRateLimitInfo(response)`. Two traps worth knowing:
+  `reset` is an **absolute Unix time in seconds**, not a delay, so use
+  `ResetAt`; and **absent is not exhausted** — a server with no rate limiter
+  configured sets no headers at all, so check `IsPresent` before reading
+  `Remaining` as a budget rather than concluding you have none left. This is
+  independent of surviving a `429`, which the transport already handles on its
+  own.
 - **`GetHealthAsync` is a differential diagnostic, not just a ping.**
   `GET /v1/health` is exempt from two gates every other request passes: it is on
   the server's public-route list, so it needs no credential, and it skips the

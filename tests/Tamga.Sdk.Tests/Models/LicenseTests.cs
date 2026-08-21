@@ -148,11 +148,13 @@ public class LicenseTests
     }
 
     /// <summary>
-    /// The four relationship ids are dead. The server's license serializer emits
-    /// <c>{ type, id, attributes }</c> and nothing else — no <c>relationships</c> object exists on
-    /// a <c>licenses</c> resource, so those properties could never have been populated from a real
-    /// response. They are kept, marked <c>[Obsolete]</c>, only because deleting a public member is
-    /// source-breaking; the mapper no longer pretends to read them.
+    /// The mapper must ignore <c>relationships</c> outright rather than bind anything from it. The
+    /// server's license serializer emits <c>{ type, id, attributes }</c> and nothing else — no
+    /// <c>relationships</c> object exists on a <c>licenses</c> resource. The four id properties
+    /// that used to be populated from it (<c>ProductId</c>/<c>PolicyId</c>/<c>UserId</c>/
+    /// <c>EnvironmentId</c>) were always <see langword="null"/>, were <c>[Obsolete]</c> from 2.0.0
+    /// and were removed in 2.1.0. This test feeds the mapper a hand-built relationships object no
+    /// server could send and pins that the surviving fields still bind and nothing throws.
     /// </summary>
     [Fact]
     public void License_FromResource_IgnoresRelationships_BecauseTheServerNeverSendsAny()
@@ -177,12 +179,5 @@ public class LicenseTests
         Assert.Equal("LIC-1", license.Key);
         Assert.True(license.Suspended);
         Assert.Equal(5, license.Uses);
-
-#pragma warning disable CS0618 // the point of the test is that these obsolete members stay null
-        Assert.Null(license.PolicyId);
-        Assert.Null(license.ProductId);
-        Assert.Null(license.UserId);
-        Assert.Null(license.EnvironmentId);
-#pragma warning restore CS0618
     }
 }
