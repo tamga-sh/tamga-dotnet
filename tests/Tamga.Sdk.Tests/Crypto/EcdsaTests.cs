@@ -99,4 +99,57 @@ public class EcdsaTests
         Assert.True(Ecdsa.Verify(ecdsa, message, der));
         Assert.False(Ecdsa.Verify(ecdsa, message, raw));
     }
+
+    // ── TryImportPublicKey ───────────────────────────────────────────────────
+
+    /// <summary>
+    /// The raw-uncompressed-point branch: 65 bytes starting <c>0x04</c> is the right SHAPE, so it
+    /// is taken — but the coordinates are still attacker-controlled, and a point that is not on
+    /// P-256 makes <c>ECDsa.Create</c> reject the parameters. That has to come back as
+    /// <see langword="null"/> ("not a usable key"), not as an exception escaping into the verifier.
+    /// </summary>
+    [Fact]
+    public void TryImportPublicKey_ReturnsNull_ForAWellShapedPointThatIsNotOnTheCurve()
+    {
+        var notOnCurve = new byte[65];
+        notOnCurve[0] = 0x04;
+        for (var i = 1; i < notOnCurve.Length; i++)
+        {
+            notOnCurve[i] = 0x01;
+        }
+
+        Assert.Null(Ecdsa.TryImportPublicKey(notOnCurve));
+    }
+
+    [Fact]
+    public void TryImportPublicKey_ReturnsNull_ForBytesThatAreNotAKeyInAnyAcceptedEncoding()
+    {
+        // Not 65 bytes, so the raw-point branch is skipped and the SPKI import is tried and fails.
+        Assert.Null(Ecdsa.TryImportPublicKey(new byte[] { 0x01, 0x02, 0x03, 0x04 }));
+        Assert.Null(Ecdsa.TryImportPublicKey(ReadOnlySpan<byte>.Empty));
+    }
+
+    [Fact]
+    public void TryImportPublicKey_AcceptsBothEncodingsTheServerCanProduce()
+    {
+        using var key = CreateKey();
+
+        using var fromSpki = Ecdsa.TryImportPublicKey(key.ExportSubjectPublicKeyInfo());
+        Assert.NotNull(fromSpki);
+
+        var p = key.ExportParameters(false);
+        var rawPoint = new byte[65];
+        rawPoint[0] = 0x04;
+        p.Q.X!.CopyTo(rawPoint, 1);
+        p.Q.Y!.CopyTo(rawPoint, 33);
+        using var fromRawPoint = Ecdsa.TryImportPublicKey(rawPoint);
+        Assert.NotNull(fromRawPoint);
+
+        // Both import paths must agree with each other — otherwise which encoding a caller happens
+        // to hold would decide whether a genuine signature verifies.
+        var message = "machine file payload"u8.ToArray();
+        var der = key.SignData(message, HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+        Assert.True(Ecdsa.Verify(fromSpki!, message, der));
+        Assert.True(Ecdsa.Verify(fromRawPoint!, message, der));
+    }
 }

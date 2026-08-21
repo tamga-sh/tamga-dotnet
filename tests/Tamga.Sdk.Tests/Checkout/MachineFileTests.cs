@@ -79,6 +79,182 @@ public class MachineFileTests
         return WrapPem(certJson);
     }
 
+    /// <summary>
+    /// Builds a machine file whose signature is genuinely valid over an arbitrary <c>enc</c>
+    /// string. Everything past the signature check — encoding split, base64 decode, payload parse,
+    /// expiry — only runs on a file that already verified, so reaching those branches needs a
+    /// correctly-signed file carrying a deliberately broken payload, not a corrupt one.
+    /// </summary>
+    private static (MachineFile File, byte[] PublicKey) SignedFileWithEnc(string enc, string alg)
+    {
+        var (publicKeyBytes, sign, _) = MakeSigner(LicenseScheme.Ed25519Sign);
+        var signature = sign(Encoding.UTF8.GetBytes(enc));
+        return (MachineFile.Parse(BuildPem(enc, signature, alg)), publicKeyBytes);
+    }
+
+    private static MachineFile ParseSignedPlain(string encPlaintextOrRaw, bool alreadyBase64, out byte[] publicKey)
+    {
+        var enc = alreadyBase64 ? encPlaintextOrRaw : Convert.ToBase64String(Encoding.UTF8.GetBytes(encPlaintextOrRaw));
+        var (file, key) = SignedFileWithEnc(enc, "base64+ed25519+v2");
+        publicKey = key;
+        return file;
+    }
+
+    // ── Payload parsing, on files that DID verify ────────────────────────────
+
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAPayloadThatIsNotJson()
+    {
+        var file = ParseSignedPlain("this is not json at all {", alreadyBase64: false, out var publicKey);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("payload JSON is malformed", ex.Message);
+    }
+
+    /// <summary>
+    /// A literal <c>null</c> is valid JSON that deserializes to <see langword="null"/> — so it
+    /// passes the parse and has to be caught by the explicit null check rather than by the
+    /// <c>JsonException</c> handler above.
+    /// </summary>
+    [Fact]
+    public void VerifyAndDecrypt_RejectsALiteralNullPayload()
+    {
+        var file = ParseSignedPlain("null", alreadyBase64: false, out var publicKey);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("payload was empty", ex.Message);
+    }
+
+    /// <summary>
+    /// The second line behind the <c>+v2</c> alg gate. A file whose alg claims v2 but whose signed
+    /// payload carries no <c>meta</c> would otherwise reach the expiry check with nothing to check
+    /// — i.e. it would never expire, which is the exact defect format v2 exists to close.
+    /// </summary>
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAV2FileWhosePayloadHasNoSignedClaims()
+    {
+        var payload = new JsonObject
+        {
+            ["data"] = new JsonObject { ["type"] = "machines", ["id"] = Guid.NewGuid().ToString() },
+        }.ToJsonString();
+        var file = ParseSignedPlain(payload, alreadyBase64: false, out var publicKey);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("missing the signed 'meta' claims", ex.Message);
+        Assert.Contains("pre-v2", ex.Message);
+    }
+
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAPlainEncThatIsNotBase64()
+    {
+        var file = ParseSignedPlain("!!! definitely not base64 !!!", alreadyBase64: true, out var publicKey);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("'enc' is not valid base64", ex.Message);
+    }
+
+    // ── The dot-separated encrypted `enc` ────────────────────────────────────
+
+    private const string EncryptedAlg = "aes-256-gcm+ed25519+v2";
+
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAnEncryptedEncWithNoSeparator()
+    {
+        var (file, publicKey) = SignedFileWithEnc(Convert.ToBase64String(new byte[32]), EncryptedAlg);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("missing its '.' separator", ex.Message);
+    }
+
+    /// <summary>
+    /// Standard base64 has no <c>.</c>, so a second separator cannot have come from the server's
+    /// encoder — splitting on the first one and hoping would silently decode a truncated
+    /// ciphertext.
+    /// </summary>
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAnEncryptedEncWithTwoSeparators()
+    {
+        var half = Convert.ToBase64String(new byte[12]);
+        var (file, publicKey) = SignedFileWithEnc($"{half}.{half}.{half}", EncryptedAlg);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("more than one '.' separator", ex.Message);
+    }
+
+    [Theory]
+    [InlineData("!!!not base64!!!", "nonce")]
+    public void VerifyAndDecrypt_RejectsAnEncryptedHalfThatIsNotBase64(string badHalf, string which)
+    {
+        var good = Convert.ToBase64String(new byte[32]);
+        var (file, publicKey) = SignedFileWithEnc($"{badHalf}.{good}", EncryptedAlg);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains($"{which} is not valid base64", ex.Message);
+    }
+
+    [Fact]
+    public void VerifyAndDecrypt_RejectsAWrongLengthNonce()
+    {
+        var shortNonce = Convert.ToBase64String(new byte[8]);
+        var ciphertext = Convert.ToBase64String(new byte[32]);
+        var (file, publicKey) = SignedFileWithEnc($"{shortNonce}.{ciphertext}", EncryptedAlg);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("nonce is 8 bytes", ex.Message);
+    }
+
+    /// <summary>
+    /// The ciphertext half is <c>ciphertext || tag</c>, so anything shorter than the 16-byte GCM
+    /// tag cannot be split into the two spans the opener needs — caught here rather than as an
+    /// out-of-range slice deeper in.
+    /// </summary>
+    [Fact]
+    public void VerifyAndDecrypt_RejectsACiphertextShorterThanTheGcmTag()
+    {
+        var nonce = Convert.ToBase64String(new byte[AesGcmCipher.NonceLength]);
+        var tooShort = Convert.ToBase64String(new byte[4]);
+        var (file, publicKey) = SignedFileWithEnc($"{nonce}.{tooShort}", EncryptedAlg);
+
+        var ex = Assert.Throws<OfflineFileFormatException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
+        Assert.Contains("expected at least the 16-byte GCM tag", ex.Message);
+    }
+
+    // ── Verifier dispatch with an unusable public key ────────────────────────
+    //
+    // TryImportPublicKey returns null for bytes that are not a key in any accepted encoding, and
+    // both verifier wrappers must then fail CLOSED. Short-circuiting to `false` is the whole point:
+    // a null-dereference or a thrown import error would be an unverified file taking a different
+    // code path from a forged one.
+
+    [Theory]
+    [InlineData(LicenseScheme.Rsa2048Pkcs1Sign)]
+    [InlineData(LicenseScheme.Rsa2048Pkcs1PssSign)]
+    [InlineData(LicenseScheme.EcdsaP256Sign)]
+    public void Verify_FailsClosed_WhenThePublicKeyCannotBeImported(LicenseScheme scheme)
+    {
+        var payloadJson = BuildPayloadJson(Guid.NewGuid(), "fp-abc");
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
+        var (_, sign, alg) = MakeSigner(scheme);
+        var signature = sign(Encoding.UTF8.GetBytes(enc));
+        var file = MachineFile.Parse(BuildPem(enc, signature, alg));
+
+        var garbage = new byte[64];
+        RandomNumberGenerator.Fill(garbage);
+
+        Assert.False(file.Verify(scheme, garbage));
+        Assert.Throws<SignatureVerificationException>(() =>
+            file.VerifyAndDecrypt(scheme, garbage, "k", "fp", IssuedAt));
+    }
+
     public static IEnumerable<object[]> AllSchemes()
     {
         yield return new object[] { LicenseScheme.Ed25519Sign };
