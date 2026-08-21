@@ -23,11 +23,26 @@ public sealed partial class TamgaClient
     /// <param name="policyId">The policy to read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
-    /// Use <see cref="GetLicensePolicyAsync"/> instead when you hold a license id rather than a
-    /// policy id: the license resource carries no <c>policy_id</c> attribute (and no
-    /// <c>relationships</c> object), so there is no way to get from a <see cref="License"/> to its
-    /// policy id client-side.
+    /// <para>
+    /// ⚠ <b>Not callable with a license key.</b> This route is gated on the <c>policy.read</c>
+    /// permission, and <c>policy.read</c> is not in the <c>LicenseToken</c> role's permission set —
+    /// so a client configured with <see cref="AuthTransport.License"/> or
+    /// <see cref="AuthTransport.BasicLicense"/> gets <c>403</c> here every time, whatever the
+    /// policy says. That is a role/permission fact, not a configuration one: no policy setting
+    /// turns it on.
+    /// </para>
+    /// <para>
+    /// <see cref="GetLicensePolicyAsync"/> returns the same resource and is gated on
+    /// <c>license.read</c>, which a license key does hold. <b>Embedded clients want that one.</b>
+    /// This overload is for admin, developer, product- and environment-token callers, or for when
+    /// you hold a policy id and no license id.
+    /// </para>
+    /// <para>
+    /// You cannot get from a <see cref="License"/> to its policy id client-side in any case: the
+    /// license resource carries no <c>policy_id</c> attribute and no <c>relationships</c> object.
+    /// </para>
     /// </remarks>
+    /// <exception cref="TamgaForbiddenException"><c>403 FORBIDDEN</c> — the credential lacks <c>policy.read</c>; a license key always does. Use <see cref="GetLicensePolicyAsync"/>.</exception>
     /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such policy in this account.</exception>
     public async Task<Policy> GetPolicyAsync(Guid policyId, CancellationToken cancellationToken = default)
     {
@@ -43,10 +58,20 @@ public sealed partial class TamgaClient
     /// <param name="licenseId">The license whose governing policy to read.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
-    /// Returns the same <c>policies</c> resource as <see cref="GetPolicyAsync"/>. This is the route
-    /// that closes the gap the heartbeat scheduler documented for several releases: with the policy
-    /// in hand, <see cref="Policy.EffectiveHeartbeatDurationSeconds"/> gives the real window and
-    /// <see cref="GetHeartbeatIntervalAsync"/> turns it into a ping interval.
+    /// <para>
+    /// Returns the same <c>policies</c> resource as <see cref="GetPolicyAsync"/>, but gated on
+    /// <c>license.read</c> rather than <c>policy.read</c> — <b>which makes this the only one of the
+    /// two an embedded client can call.</b> A license key holds <c>license.read</c> and does not
+    /// hold <c>policy.read</c>, so <see cref="GetPolicyAsync"/> answers <c>403</c> for it
+    /// unconditionally. Prefer this route by default and reach for the other only with an admin,
+    /// developer, product- or environment-token credential.
+    /// </para>
+    /// <para>
+    /// This is the route that closes the gap the heartbeat scheduler documented for several
+    /// releases: with the policy in hand, <see cref="Policy.EffectiveHeartbeatDurationSeconds"/>
+    /// gives the real window and <see cref="GetHeartbeatIntervalAsync"/> turns it into a ping
+    /// interval.
+    /// </para>
     /// </remarks>
     /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such license, or the license's policy row is missing.</exception>
     public async Task<Policy> GetLicensePolicyAsync(Guid licenseId, CancellationToken cancellationToken = default)
@@ -65,6 +90,10 @@ public sealed partial class TamgaClient
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <returns><see cref="Policy.EffectiveHeartbeatWindow"/> divided by three.</returns>
     /// <remarks>
+    /// <para>
+    /// Routed through <see cref="GetLicensePolicyAsync"/>, not <see cref="GetPolicyAsync"/>, so it
+    /// works on a license key — the latter is gated on a permission that role does not hold.
+    /// </para>
     /// <para>
     /// One round trip, at activation time. The scheduler itself still does not adapt: it takes a
     /// fixed interval and keeps it, so a policy whose <c>heartbeat_duration</c> changes later needs

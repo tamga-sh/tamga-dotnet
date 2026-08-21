@@ -194,10 +194,18 @@ public sealed record Machine
     /// It is therefore route-dependent, and the split lands squarely across this SDK's surface:
     /// <list type="bullet">
     /// <item><description>
-    /// <see cref="TamgaClient.CreateMachineAsync"/>, <see cref="TamgaClient.PingHeartbeatAsync"/>
-    /// and <see cref="TamgaClient.ResetHeartbeatAsync"/> return rows from <c>INSERT</c>/
+    /// <see cref="TamgaClient.CreateMachineAsync"/>, <see cref="TamgaClient.PingHeartbeatAsync"/>,
+    /// <see cref="TamgaClient.ResetHeartbeatAsync"/> and
+    /// <see cref="TamgaClient.UpdateMachineAsync"/> return rows from <c>INSERT</c>/
     /// <c>UPDATE … RETURNING</c> statements that do not join <c>policies</c>, so this is computed
     /// against the 600s fallback even when the policy sets a shorter <c>heartbeat_duration</c>.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="TamgaClient.GetMachineAsync"/> and <see cref="TamgaClient.ListMachinesAsync"/>
+    /// resolve through queries that DO join <c>policies</c>, so both carry the real
+    /// policy-derived value — and <c>NextHeartbeatAt - LastHeartbeatAt</c> on either recovers the
+    /// effective window directly. <see cref="TamgaClient.GetLicensePolicyAsync"/> is the more
+    /// direct route to the same number.
     /// </description></item>
     /// <item><description>
     /// <see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/> — the machine embedded in a
@@ -213,8 +221,9 @@ public sealed record Machine
     /// you already hold.
     /// </description></item>
     /// </list>
-    /// So "this SDK cannot see the heartbeat window" would be false as a blanket claim — it can,
-    /// on exactly one route. What it cannot do is see it from a ping, or notice it changing.
+    /// So "this SDK cannot see the heartbeat window" is false — it can, on three machine routes
+    /// and directly via <see cref="TamgaClient.GetLicensePolicyAsync"/>. What it still cannot do
+    /// is see the window from a ping, or notice it changing after the fact.
     /// </remarks>
     public DateTimeOffset? NextHeartbeatAt { get; init; }
 

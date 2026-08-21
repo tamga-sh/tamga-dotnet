@@ -131,8 +131,8 @@ mine".
 | Call | Route |
 |---|---|
 | `GetLicenseAsync(id)` | `GET /licenses/{id}` |
-| `GetPolicyAsync(id)` | `GET /policies/{id}` |
-| `GetLicensePolicyAsync(licenseId)` | `GET /licenses/{id}/policy` |
+| `GetPolicyAsync(id)` | `GET /policies/{id}` — **403s on a license key** |
+| `GetLicensePolicyAsync(licenseId)` | `GET /licenses/{id}/policy` — use this one |
 | `GetHeartbeatIntervalAsync(licenseId)` | the above, divided by three |
 | `GetMachineAsync(id)` | `GET /machines/{id}` |
 | `UpdateMachineAsync(id, request)` | `PATCH /machines/{id}` |
@@ -415,12 +415,19 @@ around:
   `.machine` file is a snapshot from the moment the file was issued, so a later
   policy change is not reflected in a file you already hold.
 - **Do NOT derive the window from a ping response.** `CreateMachineAsync`,
-  `PingHeartbeatAsync` and `ResetHeartbeatAsync` return rows from statements that
-  do not join `policies`, so their `NextHeartbeatAt` is computed against the 600s
-  fallback whatever the policy says. Two responses for the same machine seconds
-  apart can disagree, and the endpoint a scheduler naturally calls is the one
-  that is wrong. `GetLicensePolicyAsync` and the read-backed machine above are
-  the two trustworthy sources.
+  `PingHeartbeatAsync`, `ResetHeartbeatAsync` and `UpdateMachineAsync` return rows
+  from statements that do not join `policies`, so their `NextHeartbeatAt` is
+  computed against the 600s fallback whatever the policy says. Two responses for
+  the same machine seconds apart can disagree, and the endpoint a scheduler
+  naturally calls is the one that is wrong. `GetLicensePolicyAsync` and the
+  read-backed machines above are the trustworthy sources.
+- **"A write-backed response can never say `DEAD`" has one exception:
+  `UpdateMachineAsync`.** The rule holds for the ping, the create and the reset
+  because each of those writes `last_heartbeat_at` (or nulls it) and the status is
+  then derived from the timestamp it just set. `PATCH /machines/{id}` touches no
+  heartbeat column, so the status it reports is judged against a timestamp as old
+  as it ever was, and `DEAD` is reachable from it. The discriminator is *which
+  columns the write touched*, not the HTTP verb.
 - **Whether `Machine.NextHeartbeatAt` reflects the real window depends on the
   route.** The value is derived from a window carried on the row, populated
   only when the loading query joined `policies`. `CreateMachineAsync`,
@@ -474,15 +481,25 @@ around:
   introspected client-side — only observed as `TooMuchMemory`/`TooMuchDisk`
   on a failed validation. Every one of the other 30 policy attributes the
   serializer emits is now modelled; 14 of them were silently missing before.
-- **The policy and license read routes are not scoped to the caller's own
-  license.** `GET /licenses/{id}`, `GET /policies/{id}` and
-  `GET /licenses/{id}/policy` check a `license.read` permission and the account
-  on the verified credential, but not — unlike validate and check-out — that the
-  id being read is the credential's own. A client holding one license key can
-  therefore read every policy in the account, and every license in it including
-  each one's plaintext `key`. This SDK cannot fix that; it is reported upstream.
-  Do not treat these three routes as safe to expose to an untrusted client, and
-  do not build a UI that assumes a license key can only see itself.
+- **`GetPolicyAsync` always `403`s on a license key; `GetLicensePolicyAsync` does
+  not.** `GET /policies/{id}` is gated on the `policy.read` permission, which is
+  not in the `LicenseToken` role's set — no policy setting turns it on.
+  `GET /licenses/{id}/policy` returns the identical resource and is gated on
+  `license.read`, which a license key does hold. Embedded clients want that one;
+  `GetPolicyAsync` is for admin / developer / product-token / environment-token
+  credentials, or when you hold a policy id and no license id.
+- **The read routes are not scoped to the caller's own license, and neither are
+  the machine writes.** `GET /licenses/{id}`, `GET /policies/{id}` and
+  `GET /licenses/{id}/policy` check a permission plus the account on the verified
+  credential, but not — unlike validate and check-out — that the id being read is
+  the credential's own. A client holding one license key can therefore read every
+  license in the account including each one's plaintext `key`. The same omission
+  covers machines: `LicenseToken` holds `machine.read`, `machine.update` and
+  `machine.delete`, and no machine route applies the per-license scope check, so a
+  license key can `PATCH` or `DELETE` any machine in the account. This SDK cannot
+  fix any of that; it is reported upstream. Do not expose these routes to an
+  untrusted client, and do not build a UI that assumes a license key can only
+  reach its own rows.
 - **`policy.check_in_interval` is stored in the adverbial form**
   (`daily`/`weekly`/`monthly`/`yearly`), not the noun form this SDK's
   documentation previously claimed. The decoder accepts both, and an unknown

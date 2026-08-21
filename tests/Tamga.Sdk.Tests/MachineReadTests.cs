@@ -126,6 +126,24 @@ public class MachineReadTests
         Assert.DoesNotContain("hostname", body);
     }
 
+    /// <summary>
+    /// The counterexample to "a write-backed response can never say DEAD". That rule holds because
+    /// the write set <c>last_heartbeat_at</c> and the status is derived from it — and this update
+    /// touches no heartbeat column, so the status is judged against a timestamp as old as it ever
+    /// was. Anything that treated the HTTP verb as the discriminator would get this wrong.
+    /// </summary>
+    [Fact]
+    public async Task UpdateMachineAsync_CanReportDead_DespiteBeingAWrite()
+    {
+        var (client, handler) = MakeClient();
+        var id = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, SingleMachineBody(id, "fp-1", heartbeatStatus: "DEAD"));
+
+        var machine = await client.UpdateMachineAsync(id, new UpdateMachineRequest { Name = "x" });
+
+        Assert.Equal(HeartbeatStatus.Dead, machine.HeartbeatStatus);
+    }
+
     [Fact]
     public async Task ListMachinesAsync_ReadsOffsetMetadata_AndSendsNoCursor()
     {

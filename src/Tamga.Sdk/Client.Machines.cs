@@ -168,12 +168,17 @@ public sealed partial class TamgaClient
     // ---------------------------------------------------------------
     // §G.2 Machine reads
     //
-    // These are the SDK's only READ-backed machine routes over the network, and that matters for
-    // one field: the query behind them LEFT JOINs `policies`, so `HeartbeatStatus` and
-    // `NextHeartbeatAt` are computed against the policy's real window rather than the 600s
-    // fallback the write routes report — and `DEAD` is genuinely reachable here, unlike from any
-    // ping, create or reset. See HeartbeatScheduler's remarks for why that distinction is
-    // write-vs-read rather than a list of routes.
+    // GetMachineAsync and ListMachinesAsync are the SDK's only network routes whose query LEFT
+    // JOINs `policies`, so they are the only ones whose `HeartbeatStatus` and `NextHeartbeatAt`
+    // are computed against the policy's real window rather than the 600s fallback.
+    //
+    // Note that this is NOT the same axis as write-vs-read, and the two must not be collapsed.
+    // Write-vs-read answers "can this response say DEAD?" — a response the server builds off a
+    // write that touched `last_heartbeat_at` cannot, because the status is derived from the
+    // timestamp that write just set. Joined-vs-unjoined answers "is next_heartbeat_at policy-
+    // accurate?". UpdateMachineAsync is the case that separates them: it is a write, but it never
+    // touches `last_heartbeat_at`, so its response CAN report DEAD — and its UPDATE … RETURNING
+    // does not join `policies`, so its next_heartbeat_at is on the fallback side anyway.
     // ---------------------------------------------------------------
 
     /// <summary><c>GET /machines/{id}</c> — reads a machine resource.</summary>
@@ -207,9 +212,31 @@ public sealed partial class TamgaClient
     /// <param name="request">The attributes to change; omitted ones are left untouched.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
     /// <remarks>
+    /// <para>
     /// Enveloped like <see cref="CreateMachineAsync"/> (<c>{"data":{"type":"machines","attributes":{…}}}</c>),
     /// unlike the flat component/process creates. A field cannot be set back to null through this
     /// route — see <see cref="UpdateMachineRequest"/>.
+    /// </para>
+    /// <para>
+    /// ⚠ <b>This is a write whose response can still report <see cref="HeartbeatStatus.Dead"/>.</b>
+    /// The rule that a write-backed response never says <c>DEAD</c> holds because the write set
+    /// <c>last_heartbeat_at</c> and the status is then derived from it — and this update touches no
+    /// heartbeat column at all, so the status is judged against a timestamp that is as old as it
+    /// ever was. Do not treat "it was a <c>PATCH</c>" as a reason the status must be live.
+    /// </para>
+    /// <para>
+    /// <see cref="Machine.NextHeartbeatAt"/> on this response is nevertheless the UNTRUSTWORTHY
+    /// kind: the <c>UPDATE … RETURNING</c> does not join <c>policies</c>, so it is computed against
+    /// the 600s fallback. Do not size a heartbeat interval from it — use
+    /// <see cref="GetLicensePolicyAsync"/> or a read-backed machine.
+    /// </para>
+    /// <para>
+    /// ⚠ This route is permission-gated (<c>machine.update</c>) and <b>not</b> scoped to the
+    /// caller's own license — a license key holds <c>machine.update</c> and <c>machine.delete</c>,
+    /// and no machine route applies the per-license scope check. So a credential can modify or
+    /// delete any machine in the account, not only its own. Do not build a UI on the assumption
+    /// that it can only reach its own row.
+    /// </para>
     /// </remarks>
     /// <exception cref="TamgaNotFoundException"><c>404 NOT_FOUND</c> — no such machine in this account.</exception>
     public async Task<Machine> UpdateMachineAsync(Guid machineId, UpdateMachineRequest request, CancellationToken cancellationToken = default)
