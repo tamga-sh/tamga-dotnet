@@ -313,12 +313,35 @@ public sealed class ProcessHeartbeatScheduler : IAsyncDisposable
     /// <summary>Creates a scheduler for a single process. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="processId">The ID of the process to ping.</param>
-    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
+    /// <param name="interval">
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, and falls back to
+    /// it when non-positive.
+    /// </param>
+    /// <remarks>
+    /// Same clamp, and for the same reason, as <see cref="HeartbeatScheduler(TamgaClient, Guid, TimeSpan?)"/>
+    /// — see its remarks. A zero or negative <paramref name="interval"/> falls back to
+    /// <see cref="DefaultInterval"/> instead of reaching <see cref="PeriodicTimer"/> and throwing
+    /// <see cref="ArgumentOutOfRangeException"/>; <see cref="Timeout.InfiniteTimeSpan"/>, which the
+    /// timer accepts as "never tick", is passed through unchanged. The process window is not
+    /// policy-driven (it is a hardcoded 30s server-side), so a bad value cannot arrive here from a
+    /// policy — but a caller computing an interval arithmetically can still produce one, and the
+    /// two schedulers should not answer the same mistake differently.
+    /// </remarks>
     public ProcessHeartbeatScheduler(TamgaClient client, Guid processId, TimeSpan? interval = null)
     {
         _client = client;
         _processId = processId;
-        _timer = new PeriodicTimer(interval ?? DefaultInterval);
+        _timer = new PeriodicTimer(TickPeriod(interval));
+    }
+
+    /// <summary>
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <paramref name="interval"/> when
+    /// the timer accepts it, <see cref="DefaultInterval"/> otherwise. See the constructor's remarks.
+    /// </summary>
+    private static TimeSpan TickPeriod(TimeSpan? interval)
+    {
+        var period = interval ?? DefaultInterval;
+        return period > TimeSpan.Zero || period == Timeout.InfiniteTimeSpan ? period : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Call once per instance.</summary>

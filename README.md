@@ -415,7 +415,11 @@ around:
   reads the governing policy and returns the matching interval, and
   `Policy.EffectiveHeartbeatDurationSeconds` applies the same 600s fallback the
   server does. **Pass an interval to the constructor** — the scheduler takes the
-  value once and keeps it, so a policy changed later needs a new scheduler.
+  value once and keeps it, so a policy changed later needs a new scheduler. A
+  zero or negative interval falls back to `DefaultInterval` rather than throwing
+  (`policy.heartbeat_duration` has no `CHECK` constraint server-side, so a
+  hand-rolled window/3 can genuinely produce one); `Timeout.InfiniteTimeSpan`
+  still means "never tick", as it always did.
 - **You can also obtain the window without a policy read.** A checked-out
   `.machine` file, and now `GetMachineAsync`, both carry a read-backed
   `NextHeartbeatAt`, so `NextHeartbeatAt - LastHeartbeatAt` recovers the

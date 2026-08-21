@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 using System.Text.Json.Nodes;
 using Tamga.Sdk.Models;
 using Tamga.Sdk.Tests.Support;
@@ -302,5 +303,100 @@ public class HeartbeatSchedulerTests
 
         await secondPing.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.True(pingedCount >= 2);
+    }
+
+    /// <summary>
+    /// Reads the period a scheduler actually handed to its <see cref="PeriodicTimer"/>. Nothing
+    /// public exposes it, and reflection is deliberate: without it these tests could only assert
+    /// "the constructor did not throw", which would pass equally on a clamp to the default and on
+    /// a clamp to some arbitrary other value.
+    /// </summary>
+    private static TimeSpan ConfiguredPeriod(object scheduler)
+    {
+        var field = scheduler.GetType().GetField("_timer", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(field);
+        var timer = Assert.IsType<PeriodicTimer>(field!.GetValue(scheduler));
+        return timer.Period;
+    }
+
+    /// <summary>
+    /// Regression: a non-positive interval falls back to <see cref="HeartbeatScheduler.DefaultInterval"/>
+    /// instead of reaching <see cref="PeriodicTimer"/> and throwing
+    /// <see cref="ArgumentOutOfRangeException"/> from inside it.
+    /// </summary>
+    /// <remarks>
+    /// Reachable from real data: <c>policy.heartbeat_duration</c> carries no <c>CHECK</c>
+    /// constraint server-side and <c>effective_heartbeat_duration_secs</c> hands back <c>0</c> or a
+    /// negative verbatim, so only a caller who goes through
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/> — and so
+    /// through the already-guarded <see cref="HeartbeatScheduler.IntervalForWindow"/> — is safe.
+    /// One who does the division themselves lands here. tamga-go, tamga-java and tamga-swift all
+    /// clamp in their scheduler constructor; this pins that tamga-dotnet now does too.
+    /// </remarks>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-600)]
+    public async Task HeartbeatScheduler_NonPositiveInterval_FallsBackToDefault_RatherThanThrowing(int seconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(seconds));
+
+        Assert.Equal(HeartbeatScheduler.DefaultInterval, ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>
+    /// The clamp touches only inputs that used to throw. A positive interval, and an omitted one,
+    /// still mean exactly what they always did — and <see cref="Timeout.InfiniteTimeSpan"/>, the
+    /// one non-positive value <see cref="PeriodicTimer"/> accepts on net8.0 (as "never tick"),
+    /// survives unchanged rather than being silently repurposed into a ~200s ping loop.
+    /// </summary>
+    [Fact]
+    public async Task HeartbeatScheduler_IntervalsTheTimerAlreadyAccepted_AreUnchanged()
+    {
+        var (client, _) = MakeClient();
+
+        await using var explicitInterval = new HeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(7));
+        await using var omitted = new HeartbeatScheduler(client, Guid.NewGuid());
+        await using var infinite = new HeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+
+        Assert.Equal(TimeSpan.FromSeconds(7), ConfiguredPeriod(explicitInterval));
+        Assert.Equal(HeartbeatScheduler.DefaultInterval, ConfiguredPeriod(omitted));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(infinite));
+    }
+
+    /// <summary>
+    /// The process scheduler had the identical unguarded constructor and gets the identical clamp —
+    /// the two must not answer the same caller mistake differently. Note the fallback is
+    /// <see cref="ProcessHeartbeatScheduler.DefaultInterval"/> (~10s), not the machine one: the
+    /// process heartbeat window is a hardcoded 30s server-side.
+    /// </summary>
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    [InlineData(-30)]
+    public async Task ProcessHeartbeatScheduler_NonPositiveInterval_FallsBackToDefault_RatherThanThrowing(int seconds)
+    {
+        var (client, _) = MakeClient();
+
+        await using var scheduler = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(seconds));
+
+        Assert.Equal(ProcessHeartbeatScheduler.DefaultInterval, ConfiguredPeriod(scheduler));
+    }
+
+    /// <summary>The process-scheduler counterpart to the pass-through assertions above.</summary>
+    [Fact]
+    public async Task ProcessHeartbeatScheduler_IntervalsTheTimerAlreadyAccepted_AreUnchanged()
+    {
+        var (client, _) = MakeClient();
+
+        await using var explicitInterval = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), TimeSpan.FromSeconds(3));
+        await using var omitted = new ProcessHeartbeatScheduler(client, Guid.NewGuid());
+        await using var infinite = new ProcessHeartbeatScheduler(client, Guid.NewGuid(), Timeout.InfiniteTimeSpan);
+
+        Assert.Equal(TimeSpan.FromSeconds(3), ConfiguredPeriod(explicitInterval));
+        Assert.Equal(ProcessHeartbeatScheduler.DefaultInterval, ConfiguredPeriod(omitted));
+        Assert.Equal(Timeout.InfiniteTimeSpan, ConfiguredPeriod(infinite));
     }
 }

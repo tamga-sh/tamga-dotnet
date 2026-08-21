@@ -707,12 +707,47 @@ public sealed class HeartbeatScheduler : IAsyncDisposable
     /// <summary>Creates a scheduler for a single machine. Call <see cref="Start"/> to begin pinging.</summary>
     /// <param name="client">The client used to send each heartbeat ping.</param>
     /// <param name="machineId">The ID of the machine to ping.</param>
-    /// <param name="interval">The ping interval; defaults to <see cref="DefaultInterval"/> when omitted.</param>
+    /// <param name="interval">
+    /// The ping interval; defaults to <see cref="DefaultInterval"/> when omitted, and falls back to
+    /// it when non-positive.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// A zero or negative <paramref name="interval"/> falls back to <see cref="DefaultInterval"/>
+    /// rather than throwing — the same rule <see cref="IntervalForWindow"/> applies, and the same
+    /// rule tamga-go, tamga-java and tamga-swift apply in their own scheduler constructors. It is
+    /// reachable: <c>policy.heartbeat_duration</c> has no <c>CHECK</c> constraint server-side and
+    /// <c>effective_heartbeat_duration_secs</c> returns <c>0</c> or a negative verbatim (only
+    /// <see langword="null"/> falls back to <see cref="ServerHeartbeatWindowSeconds"/>), so a
+    /// caller who sizes an interval from a policy by hand — rather than through
+    /// <see cref="TamgaClient.GetHeartbeatIntervalAsync(Guid, CancellationToken)"/>, which routes
+    /// through <see cref="IntervalForWindow"/> and is already guarded — can arrive here with one.
+    /// Without this it reached <see cref="PeriodicTimer"/> and threw
+    /// <see cref="ArgumentOutOfRangeException"/> from inside it.
+    /// </para>
+    /// <para>
+    /// <see cref="Timeout.InfiniteTimeSpan"/> (-1ms) is the one exception and is passed through
+    /// unchanged: <see cref="PeriodicTimer"/> accepts it on net8.0 as "never tick", so it already
+    /// worked, and clamping it would silently repurpose a deliberate sentinel. Every other
+    /// non-positive value threw before this and falls back now — no input that previously
+    /// constructed a scheduler behaves differently.
+    /// </para>
+    /// </remarks>
     public HeartbeatScheduler(TamgaClient client, Guid machineId, TimeSpan? interval = null)
     {
         _client = client;
         _machineId = machineId;
-        _timer = new PeriodicTimer(interval ?? DefaultInterval);
+        _timer = new PeriodicTimer(TickPeriod(interval));
+    }
+
+    /// <summary>
+    /// The period actually handed to <see cref="PeriodicTimer"/>: <paramref name="interval"/> when
+    /// the timer accepts it, <see cref="DefaultInterval"/> otherwise. See the constructor's remarks.
+    /// </summary>
+    private static TimeSpan TickPeriod(TimeSpan? interval)
+    {
+        var period = interval ?? DefaultInterval;
+        return period > TimeSpan.Zero || period == Timeout.InfiniteTimeSpan ? period : DefaultInterval;
     }
 
     /// <summary>Starts the ping loop on a background task. Idempotent-unsafe: call once per instance.</summary>
