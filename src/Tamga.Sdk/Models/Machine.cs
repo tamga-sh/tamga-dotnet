@@ -35,7 +35,7 @@ public enum HeartbeatStatus
     /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>); and license validation never emits
     /// <c>HEARTBEAT_DEAD</c>. The single place this value reaches a caller today is the machine
     /// inside a checked-out <c>.machine</c> file
-    /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt"/>), which is resolved through a read
+    /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/>), which is resolved through a read
     /// query. Treat <c>if (status == Dead)</c> written against a ping result as dead code.
     ///
     /// ⚠ <b>And where it IS observable, it does not mean the row was culled</b>, deleted, or that
@@ -135,6 +135,14 @@ public sealed record MachineAttributes
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; init; }
+
+    /// <summary>When the machine row was created.</summary>
+    [JsonPropertyName("created")]
+    public DateTimeOffset? Created { get; init; }
+
+    /// <summary>When the machine row was last updated.</summary>
+    [JsonPropertyName("updated")]
+    public DateTimeOffset? Updated { get; init; }
 }
 
 /// <summary>
@@ -186,13 +194,21 @@ public sealed record Machine
     /// It is therefore route-dependent, and the split lands squarely across this SDK's surface:
     /// <list type="bullet">
     /// <item><description>
-    /// <see cref="TamgaClient.CreateMachineAsync"/>, <see cref="TamgaClient.PingHeartbeatAsync"/>
-    /// and <see cref="TamgaClient.ResetHeartbeatAsync"/> return rows from <c>INSERT</c>/
+    /// <see cref="TamgaClient.CreateMachineAsync"/>, <see cref="TamgaClient.PingHeartbeatAsync"/>,
+    /// <see cref="TamgaClient.ResetHeartbeatAsync"/> and
+    /// <see cref="TamgaClient.UpdateMachineAsync"/> return rows from <c>INSERT</c>/
     /// <c>UPDATE … RETURNING</c> statements that do not join <c>policies</c>, so this is computed
     /// against the 600s fallback even when the policy sets a shorter <c>heartbeat_duration</c>.
     /// </description></item>
     /// <item><description>
-    /// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> — the machine embedded in a
+    /// <see cref="TamgaClient.GetMachineAsync"/> and <see cref="TamgaClient.ListMachinesAsync"/>
+    /// resolve through queries that DO join <c>policies</c>, so both carry the real
+    /// policy-derived value — and <c>NextHeartbeatAt - LastHeartbeatAt</c> on either recovers the
+    /// effective window directly. <see cref="TamgaClient.GetLicensePolicyAsync"/> is the more
+    /// direct route to the same number.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/> — the machine embedded in a
     /// <c>.machine</c> file from <see cref="TamgaClient.CheckOutMachineAsync"/> — is resolved
     /// through a query that DOES join <c>policies</c>, so there this carries the real
     /// policy-derived value. <c>NextHeartbeatAt - LastHeartbeatAt</c> on such a machine therefore
@@ -205,8 +221,9 @@ public sealed record Machine
     /// you already hold.
     /// </description></item>
     /// </list>
-    /// So "this SDK cannot see the heartbeat window" would be false as a blanket claim — it can,
-    /// on exactly one route. What it cannot do is see it from a ping, or notice it changing.
+    /// So "this SDK cannot see the heartbeat window" is false — it can, on three machine routes
+    /// and directly via <see cref="TamgaClient.GetLicensePolicyAsync"/>. What it still cannot do
+    /// is see the window from a ping, or notice it changing after the fact.
     /// </remarks>
     public DateTimeOffset? NextHeartbeatAt { get; init; }
 
@@ -219,6 +236,12 @@ public sealed record Machine
 
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
+
+    /// <summary>When the machine row was created.</summary>
+    public DateTimeOffset? Created { get; init; }
+
+    /// <summary>When the machine row was last updated.</summary>
+    public DateTimeOffset? Updated { get; init; }
 
     /// <summary>Flattens a raw JSON:API machine resource into a <see cref="Machine"/>. Shared by <see cref="TamgaClient"/> and <see cref="Checkout.MachineFile"/>.</summary>
     /// <remarks>
@@ -245,6 +268,8 @@ public sealed record Machine
             NextHeartbeatAt = attrs.NextHeartbeatAt,
             LastCheckOutAt = attrs.LastCheckOutAt,
             Metadata = attrs.Metadata,
+            Created = attrs.Created,
+            Updated = attrs.Updated,
         };
     }
 }
@@ -289,4 +314,81 @@ public sealed record CreateMachineRequest
 
     /// <summary>Arbitrary caller-supplied metadata to attach to the machine.</summary>
     public Dictionary<string, JsonElement>? Metadata { get; init; }
+}
+
+/// <summary>
+/// Request attributes for <c>PATCH /machines/{id}</c>. Every field is optional; omitting one
+/// leaves the stored value untouched.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ⚠ <b>A field cannot be cleared through this endpoint.</b> The server writes every column with
+/// <c>COALESCE($n, col)</c>, so a <see langword="null"/> means "leave alone" and there is no value
+/// that means "set back to null". This SDK omits nulls from the request body anyway, which makes
+/// the two indistinguishable on the wire — matching the only behaviour the server implements.
+/// </para>
+/// <para>
+/// <see cref="CreateMachineRequest.Fingerprint"/> is deliberately absent: the update handler does
+/// not accept it, and neither do the license, policy, owner or group associations or any heartbeat
+/// field. Re-fingerprinting a machine means creating a new one.
+/// </para>
+/// <para>
+/// <see cref="Memory"/> and <see cref="Disk"/> are MEGABYTES here too — the same units, and the
+/// same 1,048,576× inflation of the license's running total, as on
+/// <see cref="CreateMachineRequest"/>.
+/// </para>
+/// </remarks>
+public sealed record UpdateMachineRequest
+{
+    /// <summary>The machine's display name.</summary>
+    public string? Name { get; init; }
+
+    /// <summary>The machine's IP address.</summary>
+    public string? Ip { get; init; }
+
+    /// <summary>The machine's hostname.</summary>
+    public string? Hostname { get; init; }
+
+    /// <summary>The machine's platform/OS identifier.</summary>
+    public string? Platform { get; init; }
+
+    /// <summary>The number of CPU cores to report for the machine.</summary>
+    public int? Cores { get; init; }
+
+    /// <summary>The machine's memory size, in MEGABYTES — see the type-level remarks.</summary>
+    public long? Memory { get; init; }
+
+    /// <summary>The machine's disk size, in MEGABYTES — see the type-level remarks.</summary>
+    public long? Disk { get; init; }
+
+    /// <summary>Arbitrary caller-supplied metadata to attach to the machine. Replaces the stored object wholesale; it is not merged.</summary>
+    public Dictionary<string, JsonElement>? Metadata { get; init; }
+}
+
+/// <summary>
+/// The outcome of <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>: the machine that is
+/// now activated, the license verdict, and whether the machine already existed.
+/// </summary>
+public sealed record MachineActivation
+{
+    /// <summary>The activated machine — either the one just created, or the one that already held the fingerprint.</summary>
+    public required Machine Machine { get; init; }
+
+    /// <summary>The license validation that ran after activation. Read <see cref="ValidationResult.Code"/> before treating the activation as usable.</summary>
+    public required ValidationResult Validation { get; init; }
+
+    /// <summary>
+    /// <see langword="true"/> when the server answered <c>409 FINGERPRINT_TAKEN</c> and
+    /// <see cref="Machine"/> is a pre-existing row, on this license, that the call did not create.
+    /// </summary>
+    /// <remarks>
+    /// The "on this license" is load-bearing: the lookup behind it is scoped to the license being
+    /// activated, so a conflict caused by a machine on a <em>different</em> license re-throws
+    /// instead of setting this. Read it as "this license already has this machine".
+    ///
+    /// It is also the flag that suppresses the over-limit rollback: a machine this call did not
+    /// create is never deleted, however the validation comes back. See
+    /// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>.
+    /// </remarks>
+    public bool AlreadyActivated { get; init; }
 }

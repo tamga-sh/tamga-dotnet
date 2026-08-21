@@ -4,3 +4,7 @@
 # `dotnet format --verify-no-changes`'s ENDOFLINE rule (.editorconfig sets
 # end_of_line = lf) even though the repository content itself is all LF.
 * text=auto eol=lf
+
+# Server-issued crypto fixtures — byte-exact, never line-ending-normalized.
+# See tests/Tamga.Sdk.Tests/Fixtures/MachineFiles/PROVENANCE.md.
+tests/Tamga.Sdk.Tests/Fixtures/MachineFiles/*.machine -text
