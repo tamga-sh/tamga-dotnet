@@ -297,9 +297,28 @@ around:
   "NO_RESURRECTION"`). The server treats both as the no-restriction case, and
   so do this SDK's decoders — neither is surfaced as a distinct C# member,
   because that would imply a restriction the server does not apply.
-- **`Policy.HeartbeatDuration` does not drive the heartbeat window.** The
-  server uses a hardcoded 600 seconds. `HeartbeatScheduler` defaults to about
-  a third of that; do not derive an interval from the policy field.
+- **`Policy.HeartbeatDuration` DOES drive the heartbeat window — and this SDK
+  cannot read it.** The server uses `policy.heartbeat_duration` when it is set
+  and falls back to 600 seconds only when it is null
+  (`Policy::effective_heartbeat_duration_secs`; the culler measures against
+  `COALESCE(p.heartbeat_duration, 600)`). Earlier releases of this SDK
+  documented the window as a hardcoded 600s that ignored the policy — that was
+  wrong. But the correction cuts both ways: there is no policy getter here, so
+  `HeartbeatScheduler` cannot discover the effective window and its
+  `DefaultInterval` is ~1/3 of the 600s **fallback**. On a policy with a
+  shorter `heartbeat_duration`, that default pings too slowly and the machine
+  lapses to `DEAD` between pings — **pass your own `interval`**. The SDK cannot
+  detect this for you.
+- **Whether `Machine.NextHeartbeatAt` reflects the real window depends on the
+  route.** The value is derived from a window carried on the row, populated
+  only when the loading query joined `policies`. `CreateMachineAsync`,
+  `PingHeartbeatAsync` and `ResetHeartbeatAsync` return `INSERT`/`UPDATE …
+  RETURNING` rows with no join, so their `NextHeartbeatAt` (and
+  `HeartbeatStatus`) use the 600s fallback. The machine inside a `.machine`
+  file from `CheckOutMachineAsync` **is** resolved through a joining query, so
+  it carries the policy-derived value — reading
+  `NextHeartbeatAt - LastHeartbeatAt` off a checked-out machine is the one way
+  this SDK can observe the effective window.
 - **`HeartbeatStatus.Dead` does not mean the machine was culled.** It means one
   thing only: the last ping is older than the heartbeat window. The server
   derives `heartbeat_status` from `last_heartbeat_at` alone and never consults

@@ -16,8 +16,14 @@ public class HeartbeatSchedulerTests
         return (new TamgaClient(options, httpClient), handler);
     }
 
+    /// <summary>
+    /// Pins the default interval against the 600s FALLBACK window only. 600s is what the server
+    /// uses when <c>policy.heartbeat_duration</c> is null; a policy that sets it overrides the
+    /// window, and this SDK has no policy getter with which to discover that — so this assertion
+    /// says nothing about a shorter-window policy, where the caller must supply their own interval.
+    /// </summary>
     [Fact]
-    public void HeartbeatScheduler_DefaultInterval_IsWellInsideThe600sWindow()
+    public void HeartbeatScheduler_DefaultInterval_IsWellInsideTheFallbackWindow()
     {
         Assert.True(HeartbeatScheduler.DefaultInterval < TimeSpan.FromSeconds(HeartbeatScheduler.ServerHeartbeatWindowSeconds));
         // "well inside" — at most half the window; the documented default targets ~1/3 of it.

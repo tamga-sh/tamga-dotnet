@@ -4,9 +4,17 @@ using System.Text.Json.Serialization;
 namespace Tamga.Sdk.Models;
 
 /// <summary>
-/// A machine's heartbeat state. GOTCHA: the 600s (10 min) heartbeat window is hardcoded
-/// server-side, NOT driven by <c>policy.heartbeat_duration</c>.
+/// A machine's heartbeat state, evaluated against the governing policy's heartbeat window.
 /// </summary>
+/// <remarks>
+/// The window is <c>policy.heartbeat_duration</c> when that column is set, and 600s (10 min) only
+/// as the fallback when it is null (<c>Policy::effective_heartbeat_duration_secs</c>). Earlier
+/// versions of this comment claimed the 600s window was hardcoded and that
+/// <c>heartbeat_duration</c> was ignored — that was wrong, and a scheduler built on it will ping
+/// too slowly for any policy that sets a shorter duration. See
+/// <see cref="HeartbeatScheduler.ServerHeartbeatWindowSeconds"/> for what this SDK can and cannot
+/// see of the window in force.
+/// </remarks>
 [JsonConverter(typeof(HeartbeatStatusConverter))]
 public enum HeartbeatStatus
 {
@@ -106,7 +114,7 @@ public sealed record MachineAttributes
     [JsonPropertyName("last_heartbeat_at")]
     public DateTimeOffset? LastHeartbeatAt { get; init; }
 
-    /// <summary>When the machine's next heartbeat ping is due.</summary>
+    /// <summary>When the machine's next heartbeat ping is due. Route-dependent — see <see cref="Machine.NextHeartbeatAt"/>.</summary>
     [JsonPropertyName("next_heartbeat_at")]
     public DateTimeOffset? NextHeartbeatAt { get; init; }
 
@@ -158,7 +166,32 @@ public sealed record Machine
     /// <summary>When the machine last sent a heartbeat ping.</summary>
     public DateTimeOffset? LastHeartbeatAt { get; init; }
 
-    /// <summary>When the machine's next heartbeat ping is due.</summary>
+    /// <summary>
+    /// When the machine's next heartbeat ping is due. Whether this reflects the policy's real
+    /// window or the 600s fallback depends on WHICH CALL returned the machine — see the remarks.
+    /// </summary>
+    /// <remarks>
+    /// The server derives this (and <see cref="HeartbeatStatus"/>) from a window carried on the
+    /// row, which is populated only when the query that loaded the machine joined <c>policies</c>.
+    /// It is therefore route-dependent, and the split lands squarely across this SDK's surface:
+    /// <list type="bullet">
+    /// <item><description>
+    /// <see cref="TamgaClient.CreateMachineAsync"/>, <see cref="TamgaClient.PingHeartbeatAsync"/>
+    /// and <see cref="TamgaClient.ResetHeartbeatAsync"/> return rows from <c>INSERT</c>/
+    /// <c>UPDATE … RETURNING</c> statements that do not join <c>policies</c>, so this is computed
+    /// against the 600s fallback even when the policy sets a shorter <c>heartbeat_duration</c>.
+    /// </description></item>
+    /// <item><description>
+    /// <see cref="Checkout.MachineFile.VerifyAndDecrypt"/> — the machine embedded in a
+    /// <c>.machine</c> file from <see cref="TamgaClient.CheckOutMachineAsync"/> — is resolved
+    /// through a query that DOES join <c>policies</c>, so there this carries the real
+    /// policy-derived value. Reading <c>NextHeartbeatAt - LastHeartbeatAt</c> off a checked-out
+    /// machine is the one way this SDK can observe the effective window.
+    /// </description></item>
+    /// </list>
+    /// So "this SDK cannot see the heartbeat window" would be false as a blanket claim — it can,
+    /// on exactly one route. What it cannot do is see it from a ping.
+    /// </remarks>
     public DateTimeOffset? NextHeartbeatAt { get; init; }
 
     /// <summary>When the machine was last checked out (offline <c>.machine</c> file issued).</summary>

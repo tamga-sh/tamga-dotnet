@@ -427,10 +427,22 @@ public sealed record Policy
     public bool RequireHeartbeat { get; init; }
 
     /// <summary>
-    /// GOTCHA: not actually used to compute the server's heartbeat window — that window is
-    /// hardcoded to 600s regardless of this value (see gap #8). Do not use this to compute a
-    /// client-side heartbeat scheduler interval.
+    /// The heartbeat window, in seconds. This DOES drive the server's window: when set it is used
+    /// as-is, and 600s applies only as the fallback when it is null.
     /// </summary>
+    /// <remarks>
+    /// An earlier version of this comment said the window was hardcoded to 600s and that this
+    /// field was ignored. That was wrong.
+    /// <c>Policy::effective_heartbeat_duration_secs</c> returns this value when set, the culling
+    /// job measures against <c>COALESCE(p.heartbeat_duration, 600)</c>, and
+    /// <c>heartbeat_status</c>/<c>next_heartbeat_at</c> are derived from the same window.
+    ///
+    /// Using this to size a client-side ping interval is therefore correct in principle — but this
+    /// SDK gives you no way to fetch a <see cref="Policy"/> in the first place (there is no policy
+    /// getter), which is why <see cref="HeartbeatScheduler.DefaultInterval"/> is computed from the
+    /// 600s fallback and why a caller on a shorter-window policy has to supply the interval
+    /// themselves.
+    /// </remarks>
     [JsonPropertyName("heartbeat_duration")]
     public int? HeartbeatDuration { get; init; }
 

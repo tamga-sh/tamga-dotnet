@@ -60,9 +60,15 @@ try
 
     Console.WriteLine($"Machine {machine.Id} activated (fingerprint {machine.Fingerprint}).");
 
-    // HeartbeatScheduler pings on ~1/3 of the server's hardcoded 600s window by default. This
-    // sample runs it for a short window and then stops — a real long-running app would keep it
-    // alive for the whole process lifetime, including across DEAD.
+    // HeartbeatScheduler pings on ~1/3 of the server's DEFAULT 600s window. That 600s is only the
+    // fallback: the real window is policy.heartbeat_duration whenever the policy sets it. This SDK
+    // has no policy getter, so the scheduler cannot discover the effective window — on a policy
+    // with a shorter duration this default is too slow and the machine lapses to DEAD between
+    // pings. If you know your policy sets one, pass it explicitly:
+    //     new HeartbeatScheduler(client, machine.Id, TimeSpan.FromSeconds(yourWindowSeconds / 3.0))
+    //
+    // This sample runs it for a short window and then stops — a real long-running app would keep
+    // it alive for the whole process lifetime, including across DEAD.
     //
     // DEAD is NOT "the machine was culled". heartbeat_status is computed from last_heartbeat_at
     // alone; the cull job that deletes rows early-returns unless policy.require_heartbeat is set,

@@ -163,13 +163,23 @@ public sealed partial class TamgaClient
 
 /// <summary>
 /// Periodic heartbeat pinger for a single machine, built on <see cref="PeriodicTimer"/>. Pings on
-/// an interval set to ~1/3 of the server's hardcoded 600s heartbeat window
-/// (<see cref="DefaultInterval"/>) — GOTCHA: this is deliberately NOT derived from
-/// <c>policy.heartbeat_duration</c>, which the server ignores for this purpose (Tamga API
-/// protocol specification gap #8). Raises <see cref="Dead"/> when a ping observes
+/// an interval set to ~1/3 of the server's <em>default</em> 600s heartbeat window
+/// (<see cref="DefaultInterval"/>) — see <see cref="ServerHeartbeatWindowSeconds"/> for why that
+/// is a default and not the window in force. Raises <see cref="Dead"/> when a ping observes
 /// <see cref="HeartbeatStatus.Dead"/> — as a notification only; the loop keeps pinging.
 /// </summary>
 /// <remarks>
+/// <para>
+/// ⚠ <b>On a policy that sets <c>heartbeat_duration</c> below 600s, pass your own
+/// <c>interval</c>.</b> The window is policy-driven —
+/// <c>Policy::effective_heartbeat_duration_secs</c> returns <c>policy.heartbeat_duration</c> when
+/// set and falls back to 600 only when it is null, and the culling job measures against
+/// <c>COALESCE(p.heartbeat_duration, 600)</c>. This SDK exposes no policy or machine getter, so
+/// the scheduler cannot discover the effective window and computes
+/// <see cref="DefaultInterval"/> from the 600s fallback. Against a policy with, say, a 120s
+/// duration, that default pings roughly every 200s — well outside the window — and the machine
+/// goes <c>DEAD</c> between pings. Nothing in this type can detect that for you.
+/// </para>
 /// <para>
 /// ⚠ <b><see cref="HeartbeatStatus.Dead"/> does NOT mean the machine row was culled.</b> It means
 /// exactly one thing: the last ping is older than the heartbeat window. The server derives
@@ -195,10 +205,27 @@ public sealed partial class TamgaClient
 /// </remarks>
 public sealed class HeartbeatScheduler : IAsyncDisposable
 {
-    /// <summary>The server's hardcoded heartbeat window, in seconds — NOT policy-driven (gap #8).</summary>
+    /// <summary>
+    /// The server's DEFAULT heartbeat window, in seconds — the value
+    /// <c>Policy::effective_heartbeat_duration_secs</c> falls back to when
+    /// <c>policy.heartbeat_duration</c> is null. It is NOT necessarily the window in force.
+    /// </summary>
+    /// <remarks>
+    /// Kept at its original name for source compatibility, but read it as "default", not
+    /// "hardcoded". A policy that sets <c>heartbeat_duration</c> overrides it everywhere it
+    /// matters: <c>heartbeat_status</c>, <c>next_heartbeat_at</c>, and the culling job's
+    /// <c>COALESCE(p.heartbeat_duration, 600)</c>.
+    /// </remarks>
     public const int ServerHeartbeatWindowSeconds = 600;
 
     /// <summary>Default ping interval: ~1/3 of <see cref="ServerHeartbeatWindowSeconds"/>.</summary>
+    /// <remarks>
+    /// Safe only where the effective window really is the 600s fallback — i.e. a policy that
+    /// leaves <c>heartbeat_duration</c> null, or sets it to 600 or more. Under a shorter duration
+    /// this interval is too slow and the machine will lapse to <c>DEAD</c> between pings; pass an
+    /// explicit <c>interval</c> to the constructor instead. This SDK cannot pick that value for
+    /// you — it has no policy getter.
+    /// </remarks>
     public static readonly TimeSpan DefaultInterval = TimeSpan.FromSeconds(ServerHeartbeatWindowSeconds / 3.0);
 
     private readonly TamgaClient _client;
