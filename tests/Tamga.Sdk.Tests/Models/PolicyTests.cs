@@ -65,17 +65,47 @@ public class PolicyTests
         Assert.Equal($"\"{wire}\"", JsonSerializer.Serialize(expected));
     }
 
+    /// <summary>
+    /// The stored spelling is the ADVERBIAL form. The column's own CHECK constraint permits
+    /// <c>daily|weekly|monthly|yearly</c> and nothing else, so those four are the only values a
+    /// policy read can produce, and they are what serialization has to emit.
+    /// </summary>
+    /// <remarks>
+    /// This test previously asserted the noun forms (<c>day</c>…) in both directions. That was
+    /// wrong in a way the fall-through hid: <c>"weekly"</c> matched no case and decoded to
+    /// <see cref="CheckInInterval.Day"/>, understating a weekly interval by a factor of seven, with
+    /// no error anywhere. The noun forms are still accepted on read (see the theory below) because
+    /// older SDK documentation advertised them, but they are no longer what is written.
+    /// </remarks>
     [Theory]
-    [InlineData("day", CheckInInterval.Day)]
-    [InlineData("week", CheckInInterval.Week)]
-    [InlineData("month", CheckInInterval.Month)]
-    [InlineData("year", CheckInInterval.Year)]
-    public void CheckInInterval_RoundTrips_AllFourLowercaseValues(string wire, CheckInInterval expected)
+    [InlineData("daily", CheckInInterval.Day)]
+    [InlineData("weekly", CheckInInterval.Week)]
+    [InlineData("monthly", CheckInInterval.Month)]
+    [InlineData("yearly", CheckInInterval.Year)]
+    public void CheckInInterval_RoundTrips_TheFourStoredWireValues(string wire, CheckInInterval expected)
     {
         var deserialized = JsonSerializer.Deserialize<CheckInInterval>($"\"{wire}\"");
         Assert.Equal(expected, deserialized);
         // Regression: must stay lowercase, not accidentally uppercase like every other enum here.
         Assert.Equal($"\"{wire}\"", JsonSerializer.Serialize(expected));
+    }
+
+    [Theory]
+    [InlineData("day", CheckInInterval.Day)]
+    [InlineData("week", CheckInInterval.Week)]
+    [InlineData("month", CheckInInterval.Month)]
+    [InlineData("year", CheckInInterval.Year)]
+    public void CheckInInterval_StillDecodesTheNounFormsOlderDocsAdvertised(string wire, CheckInInterval expected)
+    {
+        Assert.Equal(expected, JsonSerializer.Deserialize<CheckInInterval>($"\"{wire}\""));
+    }
+
+    [Fact]
+    public void CheckInInterval_FallsBackToTheShortestInterval_OnAnUnknownValue()
+    {
+        // Over-serving a policy this SDK cannot read is the safe direction: check in too often
+        // rather than too rarely.
+        Assert.Equal(CheckInInterval.Day, JsonSerializer.Deserialize<CheckInInterval>("\"fortnightly\""));
     }
 
     [Theory]

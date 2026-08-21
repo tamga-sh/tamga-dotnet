@@ -135,6 +135,14 @@ public sealed record MachineAttributes
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     [JsonPropertyName("metadata")]
     public Dictionary<string, JsonElement>? Metadata { get; init; }
+
+    /// <summary>When the machine row was created.</summary>
+    [JsonPropertyName("created")]
+    public DateTimeOffset? Created { get; init; }
+
+    /// <summary>When the machine row was last updated.</summary>
+    [JsonPropertyName("updated")]
+    public DateTimeOffset? Updated { get; init; }
 }
 
 /// <summary>
@@ -220,6 +228,12 @@ public sealed record Machine
     /// <summary>Arbitrary caller-supplied metadata attached to the machine.</summary>
     public IReadOnlyDictionary<string, JsonElement>? Metadata { get; init; }
 
+    /// <summary>When the machine row was created.</summary>
+    public DateTimeOffset? Created { get; init; }
+
+    /// <summary>When the machine row was last updated.</summary>
+    public DateTimeOffset? Updated { get; init; }
+
     /// <summary>Flattens a raw JSON:API machine resource into a <see cref="Machine"/>. Shared by <see cref="TamgaClient"/> and <see cref="Checkout.MachineFile"/>.</summary>
     /// <remarks>
     /// Deliberately does not read <c>data.relationships</c>: the server never emits one on a
@@ -245,6 +259,8 @@ public sealed record Machine
             NextHeartbeatAt = attrs.NextHeartbeatAt,
             LastCheckOutAt = attrs.LastCheckOutAt,
             Metadata = attrs.Metadata,
+            Created = attrs.Created,
+            Updated = attrs.Updated,
         };
     }
 }
@@ -289,4 +305,77 @@ public sealed record CreateMachineRequest
 
     /// <summary>Arbitrary caller-supplied metadata to attach to the machine.</summary>
     public Dictionary<string, JsonElement>? Metadata { get; init; }
+}
+
+/// <summary>
+/// Request attributes for <c>PATCH /machines/{id}</c>. Every field is optional; omitting one
+/// leaves the stored value untouched.
+/// </summary>
+/// <remarks>
+/// <para>
+/// ⚠ <b>A field cannot be cleared through this endpoint.</b> The server writes every column with
+/// <c>COALESCE($n, col)</c>, so a <see langword="null"/> means "leave alone" and there is no value
+/// that means "set back to null". This SDK omits nulls from the request body anyway, which makes
+/// the two indistinguishable on the wire — matching the only behaviour the server implements.
+/// </para>
+/// <para>
+/// <see cref="CreateMachineRequest.Fingerprint"/> is deliberately absent: the update handler does
+/// not accept it, and neither do the license, policy, owner or group associations or any heartbeat
+/// field. Re-fingerprinting a machine means creating a new one.
+/// </para>
+/// <para>
+/// <see cref="Memory"/> and <see cref="Disk"/> are MEGABYTES here too — the same units, and the
+/// same 1,048,576× inflation of the license's running total, as on
+/// <see cref="CreateMachineRequest"/>.
+/// </para>
+/// </remarks>
+public sealed record UpdateMachineRequest
+{
+    /// <summary>The machine's display name.</summary>
+    public string? Name { get; init; }
+
+    /// <summary>The machine's IP address.</summary>
+    public string? Ip { get; init; }
+
+    /// <summary>The machine's hostname.</summary>
+    public string? Hostname { get; init; }
+
+    /// <summary>The machine's platform/OS identifier.</summary>
+    public string? Platform { get; init; }
+
+    /// <summary>The number of CPU cores to report for the machine.</summary>
+    public int? Cores { get; init; }
+
+    /// <summary>The machine's memory size, in MEGABYTES — see the type-level remarks.</summary>
+    public long? Memory { get; init; }
+
+    /// <summary>The machine's disk size, in MEGABYTES — see the type-level remarks.</summary>
+    public long? Disk { get; init; }
+
+    /// <summary>Arbitrary caller-supplied metadata to attach to the machine. Replaces the stored object wholesale; it is not merged.</summary>
+    public Dictionary<string, JsonElement>? Metadata { get; init; }
+}
+
+/// <summary>
+/// The outcome of <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>: the machine that is
+/// now activated, the license verdict, and whether the machine already existed.
+/// </summary>
+public sealed record MachineActivation
+{
+    /// <summary>The activated machine — either the one just created, or the one that already held the fingerprint.</summary>
+    public required Machine Machine { get; init; }
+
+    /// <summary>The license validation that ran after activation. Read <see cref="ValidationResult.Code"/> before treating the activation as usable.</summary>
+    public required ValidationResult Validation { get; init; }
+
+    /// <summary>
+    /// <see langword="true"/> when the server answered <c>409 FINGERPRINT_TAKEN</c> and
+    /// <see cref="Machine"/> is a pre-existing row this call did not create.
+    /// </summary>
+    /// <remarks>
+    /// Also the flag that suppresses the over-limit rollback: a machine this call did not create is
+    /// never deleted, however the validation comes back. See
+    /// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>.
+    /// </remarks>
+    public bool AlreadyActivated { get; init; }
 }

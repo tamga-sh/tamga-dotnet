@@ -262,6 +262,48 @@ public sealed record JsonApiListDocument<TAttributes>
 }
 
 /// <summary>
+/// The <c>meta.page</c> object of an OFFSET-paginated JSON:API list response — the machine
+/// collection is the only listing in this SDK that carries one.
+/// </summary>
+/// <remarks>
+/// Not a keyset cursor. The server builds this from a real <c>COUNT(*)</c> over the same filter
+/// the rows were selected with, so <see cref="Total"/> and <see cref="TotalPages"/> are exact and
+/// end-of-list needs no row-count guesswork — unlike the component listing, where the absence of
+/// any pagination metadata forces the cursor to be synthesized from a full page (see
+/// <see cref="JsonApiLinks"/>).
+///
+/// Note the casing: <c>totalPages</c> is camelCase on the wire (an explicit
+/// <c>#[serde(rename)]</c> server-side) while <c>number</c>/<c>size</c>/<c>total</c> are plain.
+/// It is NOT <c>total_pages</c>.
+/// </remarks>
+public sealed record JsonApiPageMeta
+{
+    /// <summary>The 1-based number of the page that was returned.</summary>
+    [JsonPropertyName("number")]
+    public int Number { get; init; }
+
+    /// <summary>The page size the server actually applied, after its own <c>1..100</c> clamp.</summary>
+    [JsonPropertyName("size")]
+    public int Size { get; init; }
+
+    /// <summary>Total rows matching the filters — not the table size.</summary>
+    [JsonPropertyName("total")]
+    public long Total { get; init; }
+
+    /// <summary>Total pages at this <see cref="Size"/>; <c>0</c> when <see cref="Total"/> is <c>0</c>.</summary>
+    [JsonPropertyName("totalPages")]
+    public int TotalPages { get; init; }
+}
+
+/// <summary>The <c>meta</c> object of an offset-paginated list response: <c>{ "page": { … } }</c>.</summary>
+public sealed record JsonApiListMeta
+{
+    /// <summary>The pagination block, or <see langword="null"/> on a listing that does not paginate by offset.</summary>
+    [JsonPropertyName("page")]
+    public JsonApiPageMeta? Page { get; init; }
+}
+
+/// <summary>
 /// Shared <see cref="JsonSerializerOptions"/> for every request/response body in this SDK: nulls
 /// omitted on serialize, case-insensitive property matching on deserialize, and numbers accepted
 /// from JSON strings on deserialize.
@@ -315,9 +357,23 @@ public sealed class TamgaTransport
 
     private Uri BuildUri(string path, string? query)
     {
-        var trimmedBase = _options.BaseUrl.TrimEnd('/');
         var accountSegment = Uri.EscapeDataString(_options.AccountId);
-        var uri = $"{trimmedBase}/v1/accounts/{accountSegment}{path}";
+        return BuildUnscopedUri($"/v1/accounts/{accountSegment}{path}", query);
+    }
+
+    /// <summary>
+    /// Builds a URL from the configured origin WITHOUT the <c>/v1/accounts/{account_id}</c> prefix
+    /// <see cref="BuildUri"/> adds unconditionally.
+    /// </summary>
+    /// <remarks>
+    /// Exists for exactly one route today, <c>GET /v1/health</c>, which is registered at the
+    /// server's root and is not account-scoped. Until this existed the SDK could not address it at
+    /// all — not because the server refused, but because every URL this client built went through
+    /// the account prefix. Pass a path that already starts at <c>/v1</c>.
+    /// </remarks>
+    private Uri BuildUnscopedUri(string path, string? query)
+    {
+        var uri = _options.BaseUrl.TrimEnd('/') + path;
         if (!string.IsNullOrEmpty(query))
         {
             uri += (uri.Contains('?') ? "&" : "?") + query;
@@ -379,8 +435,33 @@ public sealed class TamgaTransport
         object? jsonBody = null,
         bool jsonApiContentType = true,
         CancellationToken cancellationToken = default)
+        => await SendToUriAsync(BuildUri(path, query), method, path, jsonBody, jsonApiContentType, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Same as <see cref="SendAsync"/> but addresses a path at the configured origin's root,
+    /// skipping the <c>/v1/accounts/{account_id}</c> prefix — see <see cref="BuildUnscopedUri"/>.
+    /// </summary>
+    /// <param name="method">The HTTP method to send.</param>
+    /// <param name="path">A root-relative path that already starts at <c>/v1</c>, e.g. <c>/v1/health</c>.</param>
+    /// <param name="query">The raw query string to append, already escaped, or <see langword="null"/>.</param>
+    /// <param name="jsonApiContentType">Whether to negotiate <c>application/vnd.api+json</c>; <see langword="false"/> for the plain-JSON routes.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    public async Task<HttpResponseMessage> SendUnscopedAsync(
+        HttpMethod method,
+        string path,
+        string? query = null,
+        bool jsonApiContentType = true,
+        CancellationToken cancellationToken = default)
+        => await SendToUriAsync(BuildUnscopedUri(path, query), method, path, jsonBody: null, jsonApiContentType, cancellationToken).ConfigureAwait(false);
+
+    private async Task<HttpResponseMessage> SendToUriAsync(
+        Uri uri,
+        HttpMethod method,
+        string path,
+        object? jsonBody,
+        bool jsonApiContentType,
+        CancellationToken cancellationToken)
     {
-        var uri = BuildUri(path, query);
         var request = new HttpRequestMessage(method, uri);
         ApplyAuth(request, ref uri);
         request.RequestUri = uri;
@@ -627,6 +708,59 @@ public sealed class TamgaTransport
         }
 
         return (body, response);
+    }
+
+    /// <summary>
+    /// Same as <see cref="SendJsonApiAsync{TAttributes}"/> but treats <c>204 No Content</c> (and an
+    /// empty success body) as a legitimate answer, returning <see langword="null"/> rather than
+    /// throwing.
+    /// </summary>
+    /// <remarks>
+    /// One route needs this: <c>GET /releases/actions/upgrade</c> answers <c>204</c> whenever it
+    /// has no release to offer. Do not reuse it to paper over an unexpectedly empty body on a route
+    /// that always returns a resource — <see cref="SendJsonApiAsync{TAttributes}"/>'s
+    /// <c>EMPTY_RESPONSE</c> error is the correct outcome there.
+    /// </remarks>
+    public async Task<JsonApiDocument<TAttributes>?> SendJsonApiAllowNoContentAsync<TAttributes>(
+        HttpMethod method,
+        string path,
+        string? query = null,
+        object? jsonBody = null,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await SendAsync(method, path, query, jsonBody, jsonApiContentType: true, cancellationToken).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw ParseAndMapError(body, response.StatusCode);
+        }
+
+        return response.StatusCode == HttpStatusCode.NoContent || string.IsNullOrWhiteSpace(body)
+            ? null
+            : JsonSerializer.Deserialize<JsonApiDocument<TAttributes>>(body, TamgaJsonOptions.Default);
+    }
+
+    /// <summary>
+    /// Sends a request to a root-relative (non-account-scoped) path and returns the raw success
+    /// body, mapping errors the same way as <see cref="SendJsonApiAsync{TAttributes}"/>.
+    /// </summary>
+    /// <param name="method">The HTTP method to send.</param>
+    /// <param name="path">A root-relative path that already starts at <c>/v1</c>, e.g. <c>/v1/health</c>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    public async Task<string> SendUnscopedRawAsync(
+        HttpMethod method,
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        using var response = await SendUnscopedAsync(method, path, query: null, jsonApiContentType: false, cancellationToken).ConfigureAwait(false);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            throw ParseAndMapError(body, response.StatusCode);
+        }
+
+        return body;
     }
 
     /// <summary>Sends a request expecting no meaningful response body (e.g. <c>DELETE</c>), mapping errors the same way as <see cref="SendJsonApiAsync{TAttributes}"/>.</summary>
