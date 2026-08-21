@@ -303,6 +303,105 @@ public class ComponentProcessTests
         Assert.Null(page.NextCursor);
     }
 
+    // ── Degradation on a malformed 2xx body ──────────────────────────────────
+    //
+    // A 2xx whose body is not the document these routes promise is a server or proxy fault, not a
+    // caller mistake. It must still arrive as a typed TamgaApiException carrying a dispatchable
+    // code — never as a raw JsonException from inside the mapper, and never as an object full of
+    // defaults, which is exactly the failure mode this whole change exists to remove.
+
+    [Fact]
+    public async Task CreateComponentAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateComponentAsync(new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" }));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task ListComponentsAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.ListComponentsAsync(Guid.NewGuid(), limit: 1));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateComponentAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateComponentAsync(new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" }));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task CreateProcessAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.Created, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.CreateProcessAsync(Guid.NewGuid(), "1"));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task PingProcessAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() => client.PingProcessAsync(Guid.NewGuid()));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    /// <summary>
+    /// A resource object with no <c>attributes</c> at all still has to yield a usable id rather
+    /// than throwing — <c>id</c> lives at the resource root, so it is present even when the
+    /// attributes bag is not.
+    /// </summary>
+    [Fact]
+    public async Task CreateComponentAsync_KeepsTheId_WhenTheResourceCarriesNoAttributes()
+    {
+        var (client, handler) = MakeClient();
+        var componentId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.Created, "{\"data\":{\"type\":\"components\",\"id\":\"" + componentId + "\"}}");
+
+        var component = await client.CreateComponentAsync(
+            new CreateComponentRequest { MachineId = Guid.NewGuid(), Fingerprint = "fp-c", Name = "cpu" });
+
+        Assert.Equal(componentId, component.Id);
+        Assert.Equal("", component.Fingerprint);
+    }
+
+    [Fact]
+    public async Task PingProcessAsync_KeepsTheId_WhenTheResourceCarriesNoAttributes()
+    {
+        var (client, handler) = MakeClient();
+        var processId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, "{\"data\":{\"type\":\"processes\",\"id\":\"" + processId + "\"}}");
+
+        var process = await client.PingProcessAsync(processId);
+
+        Assert.Equal(processId, process.Id);
+        Assert.Equal("", process.Pid);
+        Assert.Null(process.LastHeartbeatAt);
+    }
+
     // ── GET /machines/{id}/processes ─────────────────────────────────────────
 
     [Fact]
@@ -363,6 +462,31 @@ public class ComponentProcessTests
 
         await client.ListMachineProcessesAsync(machineId, limit: 500);
         Assert.Contains("limit=100", handler.Requests[1].Request.RequestUri!.Query);
+    }
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_ReportsNoCursor_OnAnEmptyPage()
+    {
+        var (client, handler) = MakeClient();
+        var machineId = Guid.NewGuid();
+        handler.Enqueue(HttpStatusCode.OK, ProcessListBody(machineId));
+
+        var page = await client.ListMachineProcessesAsync(machineId, limit: 1);
+
+        Assert.Empty(page.Items);
+        Assert.Null(page.NextCursor);
+    }
+
+    [Fact]
+    public async Task ListMachineProcessesAsync_ReportsAnEmptyResponse_OnALiteralNullBody()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, "null");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.ListMachineProcessesAsync(Guid.NewGuid(), limit: 1));
+
+        Assert.Equal("EMPTY_RESPONSE", ex.Error.Code);
     }
 
     [Theory]
