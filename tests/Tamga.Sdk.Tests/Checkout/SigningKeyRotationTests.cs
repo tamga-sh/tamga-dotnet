@@ -178,6 +178,7 @@ public class SigningKeyRotationTests
             () => forged.VerifyWithKeySet(keySet, "unused-for-plain", ClockBeforeAnyExpiry));
         Assert.IsNotAssignableFrom<SigningKeySelectionException>(forgery);
         Assert.Contains("forged or corrupted", forgery.Message, StringComparison.Ordinal);
+        Assert.IsNotType<LicenseKeyMismatchException>(forgery);
     }
 
     /// <summary>
@@ -202,20 +203,27 @@ public class SigningKeyRotationTests
         Assert.Contains("no Ed25519 public key", ex.Message, StringComparison.Ordinal);
     }
 
-    /// <summary>There is deliberately no "try every key" fallback — it would destroy the distinction.</summary>
+    /// <summary>
+    /// Every usable key is tried against the signature, so a file verifies against whichever
+    /// held key signed it — the <c>kid</c> no longer gates which key may verify, it only labels a
+    /// failure. Here the claim names <c>other</c> while <c>signer</c> made the signature, and both
+    /// are held: the file is authentic under a trusted key, so it is good, and the key returned is
+    /// the one that actually verified it.
+    /// </summary>
     [Fact]
-    public void LicenseFile_DoesNotFallBackToTryingEveryKeyInTheSet()
+    public void LicenseFile_VerifiesAgainstWhicheverHeldKeySigned_EvenWhenTheKidNamesAnotherHeldKey()
     {
         using var signer = NewSigner();
         using var other = NewSigner();
 
-        // Signed by `signer`, but the claim names `other`. A try-them-all implementation would
-        // happily verify this against `signer`; a kid-selecting one must not.
         var file = LicenseFile.Parse(BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), other.Kid)));
         var keySet = SigningKeySet.FromPublicKeys(signer.PublicKeyB64, other.PublicKeyB64);
 
-        Assert.Throws<SignatureVerificationException>(
-            () => file.VerifyWithKeySet(keySet, "unused-for-plain", ClockBeforeAnyExpiry));
+        var (license, claims, usedKey) = file.VerifyWithKeySet(keySet, "unused-for-plain", ClockBeforeAnyExpiry);
+
+        Assert.Equal("LIC-ROTATE-1", license.Key);
+        Assert.Equal(other.Kid, claims.KeyId);
+        Assert.Equal(signer.Kid, usedKey.KeyId);
     }
 
     /// <summary>The signed <c>exp</c> claim is enforced on the key-set path too — it is not opt-in.</summary>
@@ -268,6 +276,152 @@ public class SigningKeyRotationTests
         var file = LicenseFile.Parse(BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid)));
 
         Assert.Throws<ArgumentNullException>(() => file.VerifyWithKeySet(null!, "unused", ClockBeforeAnyExpiry));
+    }
+
+    // ── D16: verify first; label with the kid; wrong key material is not a forgery ────────────
+
+    private static string EncryptedLicensePem(Signer signer, string payloadJson, string licenseKey)
+    {
+        var plaintext = Encoding.UTF8.GetBytes(payloadJson);
+        var nonce = new byte[AesGcmCipher.NonceLength];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
+        var (ciphertext, tag) = AesGcmCipher.Seal(Hkdf.DeriveLicenseFileKey(licenseKey), nonce, plaintext);
+
+        var payload = new byte[nonce.Length + ciphertext.Length + tag.Length];
+        Buffer.BlockCopy(nonce, 0, payload, 0, nonce.Length);
+        Buffer.BlockCopy(ciphertext, 0, payload, nonce.Length, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, payload, nonce.Length + ciphertext.Length, tag.Length);
+
+        var enc = Convert.ToBase64String(payload);
+        var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(signer.PrivateKey, Encoding.UTF8.GetBytes(enc)));
+        var certJson = JsonSerializer.Serialize(new { enc, sig, alg = "aes-256-gcm+ed25519+v2" });
+        return $"-----BEGIN LICENSE FILE-----\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(certJson))}\n-----END LICENSE FILE-----";
+    }
+
+    /// <summary>
+    /// The signature is checked before a byte of <c>enc</c> is decoded. A garbage <c>enc</c> under
+    /// a signature no held key made is a signature failure — NOT a format error, which would prove
+    /// attacker-controlled bytes had been parsed first. This is the assertion the old
+    /// decode-first order fails.
+    /// </summary>
+    [Fact]
+    public void LicenseFile_KeySetPath_VerifiesBeforeDecoding_SoAnUnverifiableGarbageEncIsASignatureFailure()
+    {
+        using var stranger = NewSigner();
+        using var trusted = NewSigner();
+
+        const string garbageEnc = "!!! not base64 !!!";
+        var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(stranger.PrivateKey, Encoding.UTF8.GetBytes(garbageEnc)));
+        var certJson = JsonSerializer.Serialize(new { enc = garbageEnc, sig, alg = "base64+ed25519+v2" });
+        var file = LicenseFile.Parse($"-----BEGIN LICENSE FILE-----\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(certJson))}\n-----END LICENSE FILE-----");
+
+        var ex = Assert.Throws<SignatureVerificationException>(
+            () => file.VerifyWithKeySet(SigningKeySet.FromPublicKeys(trusted.PublicKeyB64), "unused", ClockBeforeAnyExpiry));
+
+        // The kid was unreadable, so the failure is labelled a signature failure — and it is
+        // exactly the base type, never the wrong-key subclass.
+        Assert.IsType<SignatureVerificationException>(ex);
+        Assert.Contains("could not be read", ex.Message, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// After a good signature the ciphertext is the server's, so an AES-GCM tag failure can only
+    /// mean the wrong license key. That is its own type — still a SignatureVerificationException
+    /// for every catch clause written against 2.1.1, and never a key-selection failure.
+    /// </summary>
+    [Fact]
+    public void LicenseFile_KeySetPath_ReportsAWrongLicenseKey_AsLicenseKeyMismatch_NotAsAForgery()
+    {
+        using var signer = NewSigner();
+        var file = LicenseFile.Parse(EncryptedLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), "right-key"));
+        var keySet = SigningKeySet.FromPublicKeys(signer.PublicKeyB64);
+
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyWithKeySet(keySet, "wrong-key", ClockBeforeAnyExpiry));
+
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
+        Assert.IsNotAssignableFrom<SigningKeySelectionException>(ex);
+        Assert.NotNull(ex.InnerException);
+
+        // And the same file opens with the right key.
+        Assert.Equal("LIC-ROTATE-1", file.VerifyAndDecrypt(keySet, "right-key", ClockBeforeAnyExpiry).Key);
+    }
+
+    /// <summary>An encrypted file from a stale key set, correct license key: the kid is read (AES-GCM authenticates it) and says "unknown key", as before.</summary>
+    [Fact]
+    public void LicenseFile_KeySetPath_EncryptedFile_StaleKeySet_CorrectLicenseKey_IsUnknownKey()
+    {
+        using var signer = NewSigner();
+        using var trusted = NewSigner();
+        var file = LicenseFile.Parse(EncryptedLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), "right-key"));
+
+        var ex = Assert.Throws<UnknownSigningKeyException>(
+            () => file.VerifyWithKeySet(SigningKeySet.FromPublicKeys(trusted.PublicKeyB64), "right-key", ClockBeforeAnyExpiry));
+
+        Assert.Equal(signer.Kid, ex.KeyId);
+        Assert.Equal(new[] { trusted.Kid }, ex.AvailableKeyIds);
+    }
+
+    /// <summary>
+    /// An encrypted file from a stale key set AND the wrong license key: no key verifies and the
+    /// kid cannot be read, so the only honest label is a signature failure. Not
+    /// LicenseKeyMismatch — that claims a verified signature — and not UnknownSigningKey — no kid
+    /// was read to name.
+    /// </summary>
+    [Fact]
+    public void LicenseFile_KeySetPath_EncryptedFile_StaleKeySet_WrongLicenseKey_IsASignatureFailure()
+    {
+        using var signer = NewSigner();
+        using var trusted = NewSigner();
+        var file = LicenseFile.Parse(EncryptedLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), "right-key"));
+
+        var ex = Assert.Throws<SignatureVerificationException>(
+            () => file.VerifyWithKeySet(SigningKeySet.FromPublicKeys(trusted.PublicKeyB64), "wrong-key", ClockBeforeAnyExpiry));
+
+        Assert.IsType<SignatureVerificationException>(ex);
+    }
+
+    [Fact]
+    public void MachineFile_KeySetPath_VerifiesBeforeDecoding_SoAnUnverifiableGarbageEncIsASignatureFailure()
+    {
+        using var stranger = NewSigner();
+        using var trusted = NewSigner();
+
+        const string garbageEnc = "!!! not base64 !!!";
+        var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(stranger.PrivateKey, Encoding.UTF8.GetBytes(garbageEnc)));
+        var certJson = JsonSerializer.Serialize(new { enc = garbageEnc, sig, alg = "base64+ed25519+v2" });
+        var file = MachineFile.Parse($"-----BEGIN MACHINE FILE-----\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(certJson))}\n-----END MACHINE FILE-----");
+
+        var ex = Assert.Throws<SignatureVerificationException>(() => file.VerifyWithKeySet(
+            LicenseScheme.Ed25519Sign, SigningKeySet.FromPublicKeys(trusted.PublicKeyB64), "unused", "fp", ClockBeforeAnyExpiry));
+
+        Assert.IsType<SignatureVerificationException>(ex);
+    }
+
+    [Fact]
+    public void MachineFile_KeySetPath_ReportsAWrongFingerprint_AsLicenseKeyMismatch_NotAsAForgery()
+    {
+        using var signer = NewSigner();
+        const string fingerprint = "fp-d16";
+        const string licenseKey = "the-license-key";
+
+        var plaintext = Encoding.UTF8.GetBytes(MachinePayload(Guid.NewGuid(), fingerprint, signer.Kid));
+        var nonce = new byte[AesGcmCipher.NonceLength];
+        System.Security.Cryptography.RandomNumberGenerator.Fill(nonce);
+        var (ciphertext, tag) = AesGcmCipher.Seal(Hkdf.DeriveMachineFileKey(licenseKey, fingerprint), nonce, plaintext);
+        var ciphertextAndTag = new byte[ciphertext.Length + tag.Length];
+        Buffer.BlockCopy(ciphertext, 0, ciphertextAndTag, 0, ciphertext.Length);
+        Buffer.BlockCopy(tag, 0, ciphertextAndTag, ciphertext.Length, tag.Length);
+        var enc = $"{Convert.ToBase64String(nonce)}.{Convert.ToBase64String(ciphertextAndTag)}";
+        var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(signer.PrivateKey, Encoding.UTF8.GetBytes(enc)));
+        var certJson = JsonSerializer.Serialize(new { enc, sig, alg = "aes-256-gcm+ed25519+v2" });
+        var file = MachineFile.Parse($"-----BEGIN MACHINE FILE-----\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(certJson))}\n-----END MACHINE FILE-----");
+        var keySet = SigningKeySet.FromPublicKeys(signer.PublicKeyB64);
+
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyWithKeySet(
+            LicenseScheme.Ed25519Sign, keySet, licenseKey, "fp-other-machine", ClockBeforeAnyExpiry));
+
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
+        Assert.Equal(fingerprint, file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, keySet, licenseKey, fingerprint, ClockBeforeAnyExpiry).Fingerprint);
     }
 
     // ── Machine files ─────────────────────────────────────────────────────────
@@ -450,18 +604,16 @@ public class SigningKeyRotationTests
     }
 
     /// <summary>
-    /// The <c>alg</c> gate still applies on the key-set path: an encoding prefix that is neither
-    /// <c>base64</c> nor <c>aes-256-gcm</c> is refused, not guessed at.
+    /// The <c>alg</c> gate is ahead of every entry point, the key-set one included: an encoding
+    /// prefix that is neither <c>base64</c> nor <c>aes-256-gcm</c> is refused at Parse, not guessed at.
     /// </summary>
     [Fact]
-    public void LicenseFile_KeySetPath_RejectsAnUnrecognisedEncodingPrefix()
+    public void LicenseFile_AnUnrecognisedEncodingPrefix_IsRefusedAtParse_BeforeTheKeySetIsConsulted()
     {
         using var signer = NewSigner();
-        var file = LicenseFile.Parse(BuildLicensePem(
-            signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "rot13+ed25519+v2"));
+        var pem = BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "rot13+ed25519+v2");
 
-        Assert.Throws<UnsupportedAlgorithmException>(
-            () => file.VerifyWithKeySet(SigningKeySet.FromPublicKeys(signer.PublicKeyB64), "unused", ClockBeforeAnyExpiry));
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(pem));
     }
 
     /// <summary>
@@ -553,11 +705,11 @@ public class SigningKeyRotationTests
         Assert.Equal("LIC-ROTATE-1", file.VerifyAndDecrypt(signer.PublicKey, "unused", ClockBeforeAnyExpiry).Key);
         Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(other.PublicKey, "unused", ClockBeforeAnyExpiry));
 
-        // A pre-v2 file is still refused before anything else, and the signature is still checked
-        // first on this path — a v1 alg with a good signature is UnsupportedAlgorithm, not a
-        // signature failure.
-        var v1 = LicenseFile.Parse(BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "base64+ed25519"));
-        Assert.Throws<UnsupportedAlgorithmException>(() => v1.VerifyAndDecrypt(signer.PublicKey, "unused", ClockBeforeAnyExpiry));
+        // A pre-v2 file is refused before anything else — at Parse now, so no verifier and no key
+        // is ever involved. A v1 alg with a perfectly good signature is UnsupportedAlgorithm, not
+        // a signature failure, on every entry point.
+        var v1 = BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "base64+ed25519");
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(v1));
     }
 
     /// <summary>

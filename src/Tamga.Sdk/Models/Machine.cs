@@ -32,9 +32,8 @@ public enum HeartbeatStatus
     /// ⚠ <b>Unreachable from every write route.</b> <c>ping-heartbeat</c> writes
     /// <c>last_heartbeat_at = NOW()</c> and derives the status from that same timestamp
     /// (<c>ALIVE</c>/<c>RESURRECTED</c>); <c>create</c> never sets the column and
-    /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>); and license validation never emits
-    /// <c>HEARTBEAT_DEAD</c>. The single place this value reaches a caller today is the machine
-    /// inside a checked-out <c>.machine</c> file
+    /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>);
+    /// License validation emits <see cref="ValidationCode.HeartbeatDead"/> only for a <see cref="Scope.Fingerprint"/> on a policy with <c>require_heartbeat</c>, never off a heartbeat route. Where this value reaches a caller as a <see cref="HeartbeatStatus"/>: the machine inside a checked-out <c>.machine</c> file
     /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/>), which is resolved through a read
     /// query. Treat <c>if (status == Dead)</c> written against a ping result as dead code.
     ///
@@ -366,11 +365,16 @@ public sealed record UpdateMachineRequest
 
 /// <summary>
 /// The outcome of <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>: the machine that is
-/// now activated, the license verdict, and whether the machine already existed.
+/// now activated (or was, see <see cref="RolledBack"/>), the license verdict, and whether the
+/// machine already existed.
 /// </summary>
 public sealed record MachineActivation
 {
-    /// <summary>The activated machine — either the one just created, or the one that already held the fingerprint.</summary>
+    /// <summary>
+    /// The activated machine — either the one just created, or the one that already held the
+    /// fingerprint. When <see cref="RolledBack"/> is <see langword="true"/> it is a tombstone: the
+    /// resource as the create returned it, but its row has been deleted.
+    /// </summary>
     public required Machine Machine { get; init; }
 
     /// <summary>The license validation that ran after activation. Read <see cref="ValidationResult.Code"/> before treating the activation as usable.</summary>
@@ -381,13 +385,32 @@ public sealed record MachineActivation
     /// <see cref="Machine"/> is a pre-existing row, on this license, that the call did not create.
     /// </summary>
     /// <remarks>
-    /// The "on this license" is load-bearing: the lookup behind it is scoped to the license being
-    /// activated, so a conflict caused by a machine on a <em>different</em> license re-throws
-    /// instead of setting this. Read it as "this license already has this machine".
+    /// The "on this license" is load-bearing: the server names the existing machine in
+    /// <c>meta.machineId</c> only when it is on the license being activated, and the fallback
+    /// search is scoped to that license, so a conflict caused by a machine on a <em>different</em>
+    /// license re-throws instead of setting this. Read it as "this license already has this
+    /// machine".
     ///
     /// It is also the flag that suppresses the over-limit rollback: a machine this call did not
     /// create is never deleted, however the validation comes back. See
     /// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>.
     /// </remarks>
     public bool AlreadyActivated { get; init; }
+
+    /// <summary>
+    /// <see langword="true"/> when this call created <see cref="Machine"/>, validation answered one
+    /// of the over-limit codes, <c>deleteOnOverLimit</c> was <see langword="true"/>, and the row
+    /// was deleted again.
+    /// </summary>
+    /// <remarks>
+    /// When set, <see cref="Machine"/> is a <b>tombstone</b>: kept so the caller can log what was
+    /// rolled back, but a heartbeat or check-out against its <see cref="Models.Machine.Id"/>
+    /// answers <c>404</c>. Never <see langword="true"/> together with
+    /// <see cref="AlreadyActivated"/> — an adopted machine is never deleted. This is the one place
+    /// the SDK returns a deleted machine rather than throwing:
+    /// <see cref="TamgaClient.ActivateMachineAsync"/> throws
+    /// <see cref="MachineOverLimitException"/> for the same outcome because a tuple has nowhere to
+    /// say it. Not <c>required</c>, so a caller constructing this record on 2.1.1 still compiles.
+    /// </remarks>
+    public bool RolledBack { get; init; }
 }

@@ -162,17 +162,47 @@ public class LicenseFileTests
         Assert.False(licenseFile.Verify(publicKey));
     }
 
-    [Fact]
-    public void Verify_Throws_OnUnsupportedAlgorithm()
+    /// <summary>
+    /// D17: the format gate is a property of the file, not of the entry point. Before, a v1 file
+    /// produced UnsupportedAlgorithmException from Verify/VerifyAndDecrypt (alg lacks ed25519),
+    /// UnsupportedAlgorithmException from DecodePayloadJson (no +v2) or OfflineFileFormatException
+    /// from ParsePayload (no meta) depending on which method ran first and which malformation it
+    /// hit first. Now Parse refuses it, before any key exists to verify with.
+    /// </summary>
+    [Theory]
+    [InlineData("base64+ed25519")]            // pre-v2
+    [InlineData("aes-256-gcm+ed25519")]       // pre-v2, encrypted
+    [InlineData("rsa-sha256")]                // no grammar at all
+    [InlineData("base64+ed25519+v3")]
+    [InlineData("base64+ed25519+V2")]
+    [InlineData("base64+ed25519+v2junk")]
+    [InlineData("xbase64+ed25519+v2")]
+    [InlineData("rot13+ed25519+v2")]
+    [InlineData("base64+rsa-sha256+v2")]      // right grammar, not Ed25519
+    [InlineData("base64-ed25519-v2")]
+    [InlineData("base64")]
+    [InlineData("")]
+    public void Parse_RefusesAnAlgThatIsNotEd25519FormatV2_BeforeAnySignatureWork(string alg)
     {
-        var (publicKey, privateKey) = GenerateKeyPair();
+        var (_, privateKey) = GenerateKeyPair();
         using var _ = privateKey;
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "LIC-ABC")));
-        var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(privateKey, Encoding.UTF8.GetBytes(enc)));
-        var certJson = JsonSerializer.Serialize(new { enc, sig, alg = "rsa-sha256" });
+        // Correctly signed on purpose: the refusal must not depend on the signature being bad.
+        var pem = BuildValidPem(privateKey, enc, alg);
 
-        var licenseFile = LicenseFile.Parse(WrapPem(certJson));
-        Assert.Throws<UnsupportedAlgorithmException>(() => licenseFile.Verify(publicKey));
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(pem));
+    }
+
+    [Theory]
+    [InlineData("base64+ed25519+v2")]
+    [InlineData("aes-256-gcm+ed25519+v2")]
+    public void Parse_AcceptsExactlyTheTwoAlgsTheServerEmits(string alg)
+    {
+        var (_, privateKey) = GenerateKeyPair();
+        using var _ = privateKey;
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "LIC-ABC")));
+
+        Assert.Equal(alg, LicenseFile.Parse(BuildValidPem(privateKey, enc, alg)).Certificate.Alg);
     }
 
     [Fact]
@@ -231,7 +261,10 @@ public class LicenseFileTests
         var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519+v2");
 
         var licenseFile = LicenseFile.Parse(pem);
-        Assert.Throws<SignatureVerificationException>(() => licenseFile.VerifyAndDecrypt(publicKey, "wrong-key"));
+        // A verified signature followed by an AES-GCM failure is the wrong license key, not a
+        // forgery (D16). Still a SignatureVerificationException for a 2.1.1 catch clause.
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => licenseFile.VerifyAndDecrypt(publicKey, "wrong-key"));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     // ── Format v2: expiry inside the signature ───────────────────────────────
@@ -287,17 +320,18 @@ public class LicenseFileTests
     }
 
     [Fact]
-    public void AV1AlgIsRefusedOutright()
+    public void AV1AlgIsRefusedOutright_AtParse()
     {
         // Accepting both formats would hand back the permanent-file problem: any certificate
-        // issued before v2 could be kept and reused forever.
-        var (publicKey, privateKey) = GenerateKeyPair();
+        // issued before v2 could be kept and reused forever. The refusal now lands at Parse, so
+        // a v1 file cannot even reach a verifier — and CheckOutLicenseAsync, which parses the
+        // server's certificate, surfaces it at checkout time.
+        var (_, privateKey) = GenerateKeyPair();
         using var _ = privateKey;
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "K")));
         var pem = BuildValidPem(privateKey, enc, "base64+ed25519");
 
-        Assert.Throws<UnsupportedAlgorithmException>(
-            () => LicenseFile.Parse(pem).VerifyAndDecrypt(publicKey, "K"));
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(pem));
     }
 
     [Fact]

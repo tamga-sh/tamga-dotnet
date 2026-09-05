@@ -17,14 +17,19 @@ namespace Tamga.Sdk.Checkout;
 /// the wrong one of those is the defect this type exists to fix.
 /// </para>
 /// <para>
-/// <b>How the <c>kid</c> is used, and why that is safe.</b> The <c>kid</c> claim lives
-/// <em>inside</em> the signed payload but is read <em>before</em> the signature is checked, which
-/// is only sound under one rule: it selects a key from a set the caller already trusts, and can
-/// never supply one. A file naming a <c>kid</c> this set does not hold raises
-/// <see cref="UnknownSigningKeyException"/>; a file naming one it does hold is verified against
-/// exactly that key and nothing else. There is deliberately <b>no "try every key" fallback</b> —
-/// trying them all would verify the same set of files while destroying the distinction this type
-/// exists for. This is the same discipline JWS <c>kid</c> handling needs.
+/// <b>How the <c>kid</c> is used, and why that is safe.</b> Every usable key in the set is tried
+/// against the signature over <c>enc</c>'s base64 string <em>before</em> a byte of <c>enc</c> is
+/// decoded — the same verify-first order the single-key overloads have always used. A file that
+/// verifies against any held key is good, and the key that verified it is returned. The
+/// <c>kid</c> is read only when no key verified, and only to label the failure: a <c>kid</c> the
+/// set holds → <see cref="SignatureVerificationException"/> (forged or corrupted);
+/// <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/> → <see cref="UnpublishedSigningKeyException"/>;
+/// any other <c>kid</c> → <see cref="UnknownSigningKeyException"/> (refresh the set); a
+/// <c>kid</c> that cannot be read → <see cref="SignatureVerificationException"/>. Trying every key
+/// does not blur "stale set" and "forgery", because the <c>kid</c> still decides the label — it
+/// simply no longer gates which key may verify, so a file whose claim and signature disagree but
+/// whose signer IS trusted is accepted rather than refused. Nothing read from an unverified
+/// payload ever selects a key; it can only choose between failure messages.
 /// </para>
 /// <para>
 /// <b>Ed25519 only.</b> Every key the server publishes is Ed25519 (rotation is
@@ -34,12 +39,11 @@ namespace Tamga.Sdk.Checkout;
 /// <see cref="SigningKeyNotApplicableException"/>.
 /// </para>
 /// <para>
-/// <b>An empty set is not an error.</b> <c>account_signing_keys</c> is written only by
-/// <c>rotate_ed25519</c>, which backfills the account's current key on its way through
-/// (<c>signing_keys.rs:74-107</c>), so an account that has never rotated has no rows at all and the
-/// endpoint answers <c>{"data": []}</c>. Pin the account's published key with
-/// <see cref="SigningKey.FromEd25519PublicKey"/> and verification works before the first rotation
-/// as well as after it.
+/// <b>An empty set is not an error, but it is no longer the norm.</b> An account created before
+/// the server's key-set backfill may still answer <c>{"data": []}</c> from a server that has not
+/// run its startup sweep; after it, every account publishes its active key from creation. Pin the
+/// account's published key with <see cref="SigningKey.FromEd25519PublicKey"/> and verification
+/// works before the backfill as well as after it.
 /// </para>
 /// </remarks>
 public sealed class SigningKeySet
@@ -165,12 +169,7 @@ public sealed class SigningKeySet
     public int Count => UsableKeys.Count;
 
     /// <summary>Whether the set holds no usable key at all.</summary>
-    /// <remarks>
-    /// Not an error in itself — every verification through such a set reports
-    /// <see cref="UnknownSigningKeyException"/>, which is the honest answer — but it is almost
-    /// always a sign that the fetch or the pinned key list is wrong. See the type-level note on why
-    /// an empty published set is normal for an account that has never rotated.
-    /// </remarks>
+    /// <remarks>Not an error in itself — every verification through such a set reports <see cref="UnknownSigningKeyException"/> (or <see cref="SignatureVerificationException"/> when the <c>kid</c> is unreadable), which is the honest answer — but it is almost always a sign that the fetch or the pinned key list is wrong: after the server's key-set backfill every account publishes at least its active key. See the type-level note.</remarks>
     public bool IsEmpty => Count == 0;
 
     /// <summary>
@@ -202,33 +201,66 @@ public sealed class SigningKeySet
     }
 
     /// <summary>
-    /// Resolves the key a file's <c>kid</c> claim names, throwing the condition that distinguishes
-    /// a stale key set from a forged file.
+    /// The first usable key for which <paramref name="verifiesWith"/> answers
+    /// <see langword="true"/> when handed its raw 32 public-key bytes, or <see langword="null"/>
+    /// when none does. Keys are tried in the order supplied; unusable rows are skipped.
     /// </summary>
-    /// <param name="keyId">The <c>kid</c> read from the file's signed payload.</param>
-    /// <returns>The trusted key to verify against, and its raw 32 public-key bytes.</returns>
-    /// <exception cref="UnpublishedSigningKeyException">
-    /// <paramref name="keyId"/> is <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/> — the
-    /// server signed with an empty key because the account's key column was never populated.
-    /// </exception>
-    /// <exception cref="UnknownSigningKeyException">No key in this set has that id.</exception>
-    internal (SigningKey Key, byte[] PublicKeyBytes) Resolve(string keyId)
+    internal SigningKey? FindVerifyingKey(Func<byte[], bool> verifiesWith)
     {
-        if (Find(keyId) is { } key && key.TryGetPublicKeyBytes(out var bytes))
+        foreach (var key in _keys)
         {
-            return (key, bytes);
+            if (IsUsable(key) && key.TryGetPublicKeyBytes(out var publicKey) && verifiesWith(publicKey))
+            {
+                return key;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The exception to throw when no key in this set verified a file's signature, chosen by the
+    /// <c>kid</c> the file claims — the condition that distinguishes a stale key set from a forged
+    /// file.
+    /// </summary>
+    /// <param name="claimedKeyId">The <c>kid</c> read from the (unverified) payload, or <see langword="null"/> when it could not be read.</param>
+    /// <param name="fileKind">"License file" or "Machine file", for the message.</param>
+    /// <returns>
+    /// <see cref="SignatureVerificationException"/> when the <c>kid</c> is unreadable or names a key
+    /// this set holds (the file is forged or corrupted);
+    /// <see cref="UnpublishedSigningKeyException"/> when it is
+    /// <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/>; otherwise
+    /// <see cref="UnknownSigningKeyException"/>.
+    /// </returns>
+    internal Exception UnverifiableFileFailure(string? claimedKeyId, string fileKind)
+    {
+        if (string.IsNullOrEmpty(claimedKeyId))
+        {
+            return new SignatureVerificationException(
+                $"{fileKind} signature verification failed against every usable key in the supplied key set " +
+                $"({DescribeHeldKeys()}), and its 'kid' claim could not be read to say which key it expected — " +
+                "the file is forged or corrupted, or (if encrypted) the license key is wrong as well.");
+        }
+
+        if (Find(claimedKeyId) is not null)
+        {
+            return new SignatureVerificationException(
+                $"{fileKind} signature verification failed against the key its 'kid' claim names ('{claimedKeyId}'), " +
+                "which IS in the supplied key set, and against every other key the set holds — the file is forged or corrupted.");
         }
 
         // Checked after the lookup, not before: if a set somehow does hold this id, honouring it
         // beats diagnosing it. In practice no set can — the empty string is not a valid key, so
         // IsUsable rejects it — but the ordering costs nothing and removes the special case.
-        if (string.Equals(keyId, Crypto.Ed25519.UnpublishedAccountKeyId, StringComparison.Ordinal))
+        if (string.Equals(claimedKeyId, Crypto.Ed25519.UnpublishedAccountKeyId, StringComparison.Ordinal))
         {
-            throw new UnpublishedSigningKeyException(keyId, KeyIds);
+            return new UnpublishedSigningKeyException(claimedKeyId, KeyIds);
         }
 
-        throw new UnknownSigningKeyException(keyId, KeyIds);
+        return new UnknownSigningKeyException(claimedKeyId, KeyIds);
     }
+
+    private string DescribeHeldKeys() => Count == 0 ? "the set held no usable key" : $"had: {string.Join(", ", KeyIds)}";
 
     private static bool IsUsable(SigningKey key) =>
         !string.IsNullOrEmpty(key.KeyId) && key.IsEd25519 && key.TryGetPublicKeyBytes(out _);

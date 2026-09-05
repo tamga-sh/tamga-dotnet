@@ -58,10 +58,12 @@ var (machine, validation) = await client.ActivateMachineAsync(new CreateMachineR
 
 if (!validation.Valid)
 {
-    // Over-limit activations are rolled back for you: ActivateMachineAsync
-    // deletes the machine it just created when validation comes back
-    // TooManyMachines / TooManyCores / TooMuchMemory / TooMuchDisk /
-    // TooManyProcesses, unless you pass deleteOnOverLimit: false.
+    // Over-limit activations are rolled back for you — and then THROWN, as
+    // MachineOverLimitException (a TamgaLimitExceededException carrying the
+    // ValidationResult and the deleted machine id), so you never hold a machine
+    // whose row is gone. This branch is for the other invalid codes (Expired,
+    // Suspended, …), where the machine is real. Pass deleteOnOverLimit: false
+    // to keep the old tuple return instead.
     Console.WriteLine($"Activation rejected: {validation.Code}");
     return;
 }
@@ -117,23 +119,36 @@ if (activation.AlreadyActivated)
 }
 ```
 
+The result also says how the machine was found and what became of it:
+`RolledBack` is `true` when this call created the machine, validation came back
+over-limit and the row was deleted again — `Machine` is then a tombstone. Since
+2.1.2 a same-license conflict is resolved by the id the server names in the
+409's `meta.machineId` (one `GET /machines/{id}`, fingerprint re-checked);
+without it the license-scoped search runs as before.
+
 Two things it deliberately will not do. It never deletes an adopted machine, even
 when validation comes back over-limit — that seat belongs to something this call
-did not create. And it never adopts a machine from a *different* license: the
-lookup is scoped to `LicenseId`, so under a policy whose
-`MachineUniquenessStrategy` is `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the
-scopes where a conflict can come from another license — the scoped search finds
-nothing and the original `FingerprintTakenException` surfaces.
+did not create. And it never adopts a machine from a *different* license. When
+the server names the conflicting machine via `meta.machineId` (fast path), the
+server's own contract ensures it is on the requested license, not verified
+client-side. When no `meta.machineId` is present or that machine 404s or its
+fingerprint doesn't match (fallback), the lookup is client-scoped to `LicenseId`
+via `filter[license]` — so under a policy whose `MachineUniquenessStrategy` is
+`UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the scopes where a conflict can
+come from another license — the scoped search finds nothing and the original
+`FingerprintTakenException` surfaces.
 
-That is the correct outcome, not a gap. Returning another license's machine would
-have this client heartbeat and check out a machine its own license does not own
-while its own `machines_count` stayed at zero, and since the machine resource
-carries no `license_id` it could never detect that. Sharing one fingerprint's
-seat across licenses is precisely what the wider uniqueness scopes exist to
-prevent. Nothing is lost either: all three strategies' duplicate checks include
-the caller's own license rows, so a genuine re-activation conflicts — and is
-found — under every one of them. `AlreadyActivated` therefore means "this license
-already has this machine", the strong reading.
+That is the correct outcome, not a gap. Why this matters: the machine resource
+carries no `license_id` (removed in 2.1.0), so if another license's machine were
+returned, a caller could never detect it and would heartbeat and check out a
+machine its own license does not own while its own `machines_count` stayed at
+zero — seat-sharing across licenses, the exact harm the wider uniqueness scopes
+exist to prevent. The server's contract on the fast path prevents this; the
+client's `filter[license]` scoping on the fallback prevents it. All three
+strategies' duplicate checks do include the caller's own license rows, so a
+genuine re-activation conflicts — and is found — under every one of them.
+`AlreadyActivated` therefore means "this license already has this machine", the
+strong reading.
 
 ### Reads
 
@@ -289,6 +304,14 @@ server's `> 0 && <= 31536000` range check
   use it instead of the local clock, which on an offline client is under the
   attacker's control. The `ttl`/`expiry` fields returned in the checkout
   response envelope remain metadata only — they are not signed.
+- **A wrong license key is not a forgery.** After a verified signature an
+  AES-256-GCM failure can only mean the wrong key material —
+  `LicenseKeyMismatchException`, a `SignatureVerificationException` subclass —
+  on both file formats and on both the single-key and key-set paths. The
+  key-set paths verify the signature against every held key before decoding a
+  byte of `enc`; the `kid` only labels a failure
+  (`UnknownSigningKeyException` / `UnpublishedSigningKeyException` /
+  `SignatureVerificationException`).
 - **`alg` is parsed, never sniffed, and format v2 is mandatory.** A machine
   file's `alg` is `<encoding>+<signing-suffix>+v2`; the encoding runs to the
   first `+`, the version marker follows the last `+`, and the suffix is what
@@ -355,13 +378,14 @@ around:
   (`401 LICENSE_SUSPENDED`) and expired licenses under a `REVOKE_ACCESS` policy
   (`401 LICENSE_EXPIRED`) are refused at the same front door, before any
   per-endpoint check runs.
-- **16 of the 24 `ValidationCode` values are reachable.** `NotFound` is
+- **19 of the 24 `ValidationCode` values are reachable.** `NotFound` is
   modeled but never emitted (the server returns HTTP 404 directly instead),
-  and `Banned`, `TooManyUsers`, `HeartbeatDead`, `HeartbeatNotStarted`,
-  `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and `VersionScopeMismatch`
-  exist for forward-compatibility only. Do not build UX around those.
-  `EntitlementsMissing` and `FingerprintScopeMismatch` **are** reachable now —
-  see the next entry.
+  and `Banned`, `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and
+  `VersionScopeMismatch` exist for forward-compatibility only. `TooManyUsers`
+  (all three validate endpoints, `policy.max_users`), `HeartbeatDead` and
+  `HeartbeatNotStarted` (a `Scope.Fingerprint` on a `require_heartbeat`
+  policy) **are** reachable as of the API's audit patch, as are
+  `EntitlementsMissing` and `FingerprintScopeMismatch` — see the next entry.
 - **`Scope`: six fields enforced, two rejected.** `Product`, `Policy`, `User`,
   `Environment`, `Entitlements` and `Fingerprint` all constrain validation.
   `Entitlements` takes entitlement **codes** (not the UUIDs the attach/detach
@@ -462,7 +486,9 @@ around:
   derived from the timestamp that write set. `ping-heartbeat` sets
   `last_heartbeat_at = NOW()` and so answers `ALIVE` or `RESURRECTED`;
   `CreateMachineAsync` leaves the column unset and `ResetHeartbeatAsync` nulls
-  it, both giving `NOT_STARTED`; validation never emits `HEARTBEAT_DEAD`. So an
+  it, both giving `NOT_STARTED`; validation emits `HEARTBEAT_DEAD` only for a
+  `Scope.Fingerprint` on a `require_heartbeat` policy, which is a read, not a
+  heartbeat route. So an
   `if (status == Dead)` branch written against `HeartbeatScheduler` is
   unreachable code, and re-activation placed inside one never runs. The rule
   covers every status, not just `DEAD`: the loop ends on cancellation, on

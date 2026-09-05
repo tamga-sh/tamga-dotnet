@@ -209,22 +209,19 @@ public class MachineFileFixtureTests
 
     [Theory]
     [MemberData(nameof(AllFixtures))]
-    public void Fixture_WithoutV2Marker_IsRejected(string name)
+    public void Fixture_WithoutV2Marker_IsRejected_AtParse(string name)
     {
         var fixture = Manifest[name];
         var original = MachineFile.Parse(ReadFixture(fixture.File));
 
         // `alg` sits OUTSIDE the signature (the server signs `enc`'s string bytes only), so
-        // rewriting it leaves a file whose signature still verifies. The v2 gate is therefore the
-        // only thing standing between a caller and a v1 file — which carried no `exp` inside the
-        // signature and derived its AES key by zero-padding the license key instead of HKDF.
-        var downgraded = MachineFile.Parse(WithAlg(original, fixture.Alg.Replace("+v2", "", StringComparison.Ordinal)));
+        // rewriting it leaves bytes whose signature would still verify — which is exactly why the
+        // v2 gate cannot wait for a verifier. A v1 alg carried no `exp` inside the signature and
+        // derived its AES key by zero-padding the license key instead of HKDF. The gate now fires
+        // at Parse, before any key or signature work, on every entry point alike (D17).
+        var downgraded = WithAlg(original, fixture.Alg.Replace("+v2", "", StringComparison.Ordinal));
 
-        var scheme = ParseScheme(fixture.Scheme);
-        var publicKey = Convert.FromBase64String(fixture.PublicKeyB64);
-        Assert.True(downgraded.Verify(scheme, publicKey), "sanity: rewriting `alg` must not disturb the signature");
-
-        Assert.Throws<UnsupportedAlgorithmException>(() => Open(downgraded, fixture));
+        Assert.Throws<UnsupportedAlgorithmException>(() => MachineFile.Parse(downgraded));
     }
 
     /// <summary>
@@ -261,9 +258,12 @@ public class MachineFileFixtureTests
             return; // A mutation that happens to be a no-op for this fixture's alg.
         }
 
-        var mutated = MachineFile.Parse(WithAlg(MachineFile.Parse(ReadFixture(fixture.File)), mutatedAlg));
+        var mutated = WithAlg(MachineFile.Parse(ReadFixture(fixture.File)), mutatedAlg);
 
-        Assert.Throws<UnsupportedAlgorithmException>(() => Open(mutated, fixture));
+        // Grammar, version and encoding-prefix mutations are refused by Parse; a mutation that
+        // survives Parse (it only corrupts the signing suffix) is refused by the scheme cross-check
+        // in Open. Either way it is the one exception type, and never a signature verdict.
+        Assert.Throws<UnsupportedAlgorithmException>(() => Open(MachineFile.Parse(mutated), fixture));
     }
 
     [Theory]
@@ -339,8 +339,9 @@ public class MachineFileFixtureTests
         var scheme = ParseScheme(fixture.Scheme);
         var publicKey = Convert.FromBase64String(fixture.PublicKeyB64);
 
-        Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyAndDecrypt(
             scheme, publicKey, fixture.LicenseKey ?? string.Empty, fixture.Fingerprint + "-wrong", ClockBeforeAnyExpiry));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     [Theory]
@@ -352,8 +353,9 @@ public class MachineFileFixtureTests
         var scheme = ParseScheme(fixture.Scheme);
         var publicKey = Convert.FromBase64String(fixture.PublicKeyB64);
 
-        Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyAndDecrypt(
             scheme, publicKey, (fixture.LicenseKey ?? string.Empty) + "-wrong", fixture.Fingerprint, ClockBeforeAnyExpiry));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     [Theory]

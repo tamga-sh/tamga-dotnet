@@ -68,9 +68,11 @@ public sealed partial class TamgaClient
     /// then validates the license and interprets <see cref="ValidationCode.TooManyMachines"/>/
     /// <see cref="ValidationCode.TooManyCores"/>/<see cref="ValidationCode.TooMuchMemory"/>/
     /// <see cref="ValidationCode.TooMuchDisk"/>/<see cref="ValidationCode.TooManyProcesses"/>. On
-    /// any of these, deletes the just-created machine when <paramref name="deleteOnOverLimit"/> is
-    /// <see langword="true"/> (the default), because the machine row exists and is counted against
-    /// the license unless this SDK removes it.
+    /// any of these, when <paramref name="deleteOnOverLimit"/> is <see langword="true"/> (the
+    /// default), deletes the just-created machine — because the row exists and is counted against
+    /// the license until this SDK removes it — and then <b>throws</b>
+    /// <see cref="MachineOverLimitException"/>. With <paramref name="deleteOnOverLimit"/>
+    /// <see langword="false"/> the tuple is returned unconditionally and the row is left in place.
     /// </summary>
     /// <remarks>
     /// There are TWO ways an activation can be over-limit, and a caller has to handle both:
@@ -79,10 +81,10 @@ public sealed partial class TamgaClient
     /// <item>
     /// <description>
     /// <b>The create is refused outright</b> (<c>422</c>, e.g. <c>MACHINE_LIMIT_EXCEEDED</c>).
-    /// This method then throws a <see cref="TamgaLimitExceededException"/> and never reaches the
-    /// validate or delete steps — there is nothing to roll back, because nothing was created.
-    /// Read <see cref="TamgaLimitExceededException.EquivalentValidationCode"/> to get the same
-    /// <see cref="ValidationCode"/> path 2 would have reported.
+    /// This method then throws a <see cref="TamgaLimitExceededException"/> subclass and never
+    /// reaches the validate or delete steps — there is nothing to roll back, because nothing was
+    /// created. Read <see cref="TamgaLimitExceededException.EquivalentValidationCode"/> to get the
+    /// same <see cref="ValidationCode"/> path 2 reports.
     /// </description>
     /// </item>
     /// <item>
@@ -91,13 +93,24 @@ public sealed partial class TamgaClient
     /// check runs through the policy's overage strategy, so under <c>ALLOW_ACCESS</c> or
     /// <c>ALLOW_1_25X_OVERAGE</c> the row is created and only <c>validate</c> objects. This is the
     /// path <paramref name="deleteOnOverLimit"/> exists for, and it is still live — do not assume
-    /// path 1 replaced it.
+    /// path 1 replaced it. After the rollback this method throws
+    /// <see cref="MachineOverLimitException"/>, also a <see cref="TamgaLimitExceededException"/>,
+    /// carrying the verdict and the deleted id. It used to return the deleted machine as a
+    /// success value (audit D15), which left a caller heartbeating a row that answers <c>404</c>.
     /// </description>
     /// </item>
     /// </list>
+    ///
+    /// Both paths are therefore one <c>catch (TamgaLimitExceededException)</c>. A successful
+    /// return means the machine exists; a validation that is not over-limit but still not
+    /// <see cref="ValidationResult.Valid"/> (e.g. <see cref="ValidationCode.Expired"/>) is
+    /// returned, not thrown — that machine is real. If the rollback <c>DELETE</c> itself fails,
+    /// that failure propagates in place of <see cref="MachineOverLimitException"/> and the row may
+    /// still exist.
     /// </remarks>
-    /// <exception cref="TamgaLimitExceededException">The server refused the create itself — see path 1 above.</exception>
-    /// <exception cref="FingerprintTakenException">The fingerprint is already activated in the policy's uniqueness scope; the existing machine is untouched.</exception>
+    /// <exception cref="TamgaLimitExceededException">The server refused the create itself (path 1), or — as <see cref="MachineOverLimitException"/> — validation reported the overage and the machine was deleted again (path 2).</exception>
+    /// <exception cref="MachineOverLimitException">Path 2 with <paramref name="deleteOnOverLimit"/> <see langword="true"/>: the machine was created, validation answered an over-limit code, and the machine was deleted. <see cref="MachineOverLimitException.Validation"/> and <see cref="MachineOverLimitException.DeletedMachineId"/> carry what the tuple used to.</exception>
+    /// <exception cref="FingerprintTakenException">The fingerprint is already activated in the policy's uniqueness scope; the existing machine is untouched. <see cref="FingerprintTakenException.ExistingMachineId"/> names it when it is on this license.</exception>
     public async Task<(Machine Machine, ValidationResult Validation)> ActivateMachineAsync(
         CreateMachineRequest request,
         bool deleteOnOverLimit = true,
@@ -110,7 +123,11 @@ public sealed partial class TamgaClient
 
         if (deleteOnOverLimit && IsOverLimitCode(validation.Code))
         {
+            // The row exists and counts against the license until it is removed. Once it is
+            // removed, handing it back as a success value is the trap this throw closes: a
+            // caller that read `validation.Valid` late, or not at all, heartbeated a 404.
             await DeleteMachineAsync(machine.Id, cancellationToken).ConfigureAwait(false);
+            throw new MachineOverLimitException(validation, machine.Id);
         }
 
         return (machine, validation);
@@ -447,9 +464,20 @@ public sealed partial class TamgaClient
     /// <see cref="CreateMachineAsync"/> and <see cref="ActivateMachineAsync"/> both surface that
     /// raw. For an application whose activation step can run twice — a reinstall, a crash before
     /// the machine id was persisted, a user clicking "activate" again — that leaves no way forward
-    /// except catching the exception and guessing. This method is the way forward: it looks the
-    /// fingerprint up (see <see cref="FindMachineByFingerprintAsync"/>) and carries on with the row
-    /// that already exists, reporting it as <see cref="MachineActivation.AlreadyActivated"/>.
+    /// except catching the exception and guessing. This method is the way forward: it finds the
+    /// machine that already holds the fingerprint and carries on with it, reporting it as
+    /// <see cref="MachineActivation.AlreadyActivated"/>.
+    /// </para>
+    /// <para>
+    /// <b>How the existing machine is found.</b> When the server's <c>409</c> carries
+    /// <c>meta.machineId</c> — which it does exactly when the conflicting machine is on
+    /// <see cref="CreateMachineRequest.LicenseId"/> — the machine is read by id with
+    /// <see cref="GetMachineAsync"/> and adopted after an ordinal re-check of its
+    /// <see cref="Machine.Fingerprint"/>. Without <c>meta</c> (an older server; a cross-license
+    /// conflict, which never carries one) the license-scoped paginated search
+    /// (<see cref="FindMachineByFingerprintAsync"/>) runs as before. If the named machine has
+    /// vanished (<c>404</c>) or reports a different fingerprint, the search runs too. A search
+    /// that finds nothing re-throws the server's conflict.
     /// </para>
     /// <para>
     /// ⚠ <b>An adopted machine is never rolled back.</b> When the fingerprint was already taken,
@@ -483,6 +511,14 @@ public sealed partial class TamgaClient
     /// <see cref="TamgaLimitExceededException"/>: no row was written, so there is nothing to adopt
     /// and nothing to roll back.
     /// </para>
+    /// <para>
+    /// An over-limit verdict on a machine this call created is rolled back when
+    /// <paramref name="deleteOnOverLimit"/> is <see langword="true"/> and reported as
+    /// <see cref="MachineActivation.RolledBack"/> — this method does <b>not</b> throw
+    /// <see cref="MachineOverLimitException"/> the way <see cref="ActivateMachineAsync"/> does,
+    /// because its result type has room to say so; the returned <see cref="MachineActivation.Machine"/>
+    /// is then a documented tombstone.
+    /// </para>
     /// </remarks>
     /// <exception cref="FingerprintTakenException">The create conflicted and no machine on <see cref="CreateMachineRequest.LicenseId"/> holds that exact fingerprint — so the conflict came from another license, and adopting its machine would be a seat-sharing bug rather than a re-activation. The server's original error is preserved.</exception>
     /// <exception cref="TamgaLimitExceededException">The server refused the create itself.</exception>
@@ -498,9 +534,9 @@ public sealed partial class TamgaClient
         {
             machine = await CreateMachineAsync(request, cancellationToken).ConfigureAwait(false);
         }
-        catch (FingerprintTakenException)
+        catch (FingerprintTakenException conflict)
         {
-            var existing = await FindMachineByFingerprintAsync(request.LicenseId, request.Fingerprint, cancellationToken).ConfigureAwait(false);
+            var existing = await FindConflictingMachineAsync(conflict, request, cancellationToken).ConfigureAwait(false);
             if (existing is null)
             {
                 // The conflict is real, but this license does not hold that fingerprint — so it
@@ -517,9 +553,11 @@ public sealed partial class TamgaClient
 
         var validation = await ValidateByIdAsync(request.LicenseId, cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        var rolledBack = false;
         if (deleteOnOverLimit && !alreadyActivated && IsOverLimitCode(validation.Code))
         {
             await DeleteMachineAsync(machine.Id, cancellationToken).ConfigureAwait(false);
+            rolledBack = true;
         }
 
         return new MachineActivation
@@ -527,7 +565,43 @@ public sealed partial class TamgaClient
             Machine = machine,
             Validation = validation,
             AlreadyActivated = alreadyActivated,
+            RolledBack = rolledBack,
         };
+    }
+
+    /// <summary>
+    /// Resolves the machine a <c>409 FINGERPRINT_TAKEN</c> is about: by id when the server named
+    /// it in <c>meta.machineId</c>, else by the license-scoped search. <see langword="null"/> when
+    /// neither yields a machine on <paramref name="request"/>'s license with that exact fingerprint.
+    /// </summary>
+    private async Task<Machine?> FindConflictingMachineAsync(
+        FingerprintTakenException conflict,
+        CreateMachineRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (conflict.ExistingMachineId is { } existingId)
+        {
+            Machine? named = null;
+            try
+            {
+                named = await GetMachineAsync(existingId, cancellationToken).ConfigureAwait(false);
+            }
+            catch (TamgaNotFoundException)
+            {
+                // Deleted between the conflict and this read. The scoped search below is the
+                // honest answer; if it also finds nothing, the caller re-throws the conflict.
+            }
+
+            // The server only names a machine on this license, but the fingerprint is re-checked
+            // here anyway, ordinal, exactly as the search result is — cheap, and it means a row
+            // is adopted on two agreeing facts rather than one.
+            if (named is not null && string.Equals(named.Fingerprint, request.Fingerprint, StringComparison.Ordinal))
+            {
+                return named;
+            }
+        }
+
+        return await FindMachineByFingerprintAsync(request.LicenseId, request.Fingerprint, cancellationToken).ConfigureAwait(false);
     }
 
     private static TamgaApiException MissingDataError() =>
@@ -585,8 +659,8 @@ public sealed partial class TamgaClient
 /// bearing writes obey it — <see cref="TamgaClient.PingHeartbeatAsync"/> sets the timestamp to
 /// <c>NOW()</c> (<c>ALIVE</c>, or <c>RESURRECTED</c> when a death event predates it), while
 /// <see cref="TamgaClient.CreateMachineAsync"/> leaves it unset and
-/// <see cref="TamgaClient.ResetHeartbeatAsync"/> nulls it (both <c>NOT_STARTED</c>). License
-/// validation likewise never emits <c>HEARTBEAT_DEAD</c>.
+/// <see cref="TamgaClient.ResetHeartbeatAsync"/> nulls it (both <c>NOT_STARTED</c>).
+/// License validation emits <c>HEARTBEAT_DEAD</c> only for a <c>scope.fingerprint</c> on a policy with <c>require_heartbeat</c> — a read, never this loop's ping.
 /// </para>
 /// <para>
 /// <b>A response built off a READ can report <c>DEAD</c>, and one such route already reaches

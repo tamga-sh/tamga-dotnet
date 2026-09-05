@@ -81,6 +81,7 @@ public sealed partial class TamgaClient
     /// file. Returns the parsed, UNVERIFIED <see cref="LicenseFile"/> — call
     /// <see cref="LicenseFile.Verify"/> or <see cref="LicenseFile.VerifyAndDecrypt(System.ReadOnlySpan{byte}, string)"/> separately.
     /// </summary>
+    /// <exception cref="UnsupportedAlgorithmException">The server's certificate is not a format-v2 file — <see cref="LicenseFile.Parse"/> refuses it here, at checkout, rather than at the first verify. Only a server predating format v2 can produce this.</exception>
     public async Task<LicenseFile> CheckOutLicenseAsync(
         Guid licenseId,
         bool encrypt = false,
@@ -107,6 +108,7 @@ public sealed partial class TamgaClient
     /// parsed, UNVERIFIED <see cref="MachineFile"/>.
     /// </summary>
     /// <exception cref="TtlInvalidException"><paramref name="ttl"/> is outside the valid range.</exception>
+    /// <exception cref="UnsupportedAlgorithmException">The server's certificate is not a format-v2 file — <see cref="MachineFile.Parse"/> refuses it here, at checkout, rather than at the first verify. Only a server predating format v2 can produce this.</exception>
     public async Task<MachineFile> CheckOutMachineAsync(
         Guid machineId,
         bool encrypt = false,

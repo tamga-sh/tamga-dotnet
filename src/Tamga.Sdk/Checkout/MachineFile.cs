@@ -88,11 +88,12 @@ public sealed record MachineFilePayload
 /// the signing suffix is everything between. Both <c>aes-256-gcm</c> and <c>rsa-pss-sha256</c>
 /// contain hyphens and the suffix itself can contain them, so nothing here may be recovered by
 /// substring sniffing — a <c>Contains("base64")</c> test happily accepts <c>xbase64+ed25519+v3</c>.
-/// A file with no <c>+v2</c> is rejected outright: a v1 file carried no <c>exp</c> inside its
-/// signature and derived its AES key by zero-padding the license key instead of HKDF, so accepting
-/// one silently reinstates both weaknesses. Note <c>alg</c> is NOT covered by the signature (the
-/// server signs <c>enc</c>'s bytes only), so it is attacker-malleable — which is exactly why it is
-/// gated rather than trusted.
+/// A file with no <c>+v2</c> is rejected outright by <c>Parse</c>, before any scheme or key is
+/// known: a v1 file carried no <c>exp</c> inside its signature and derived its AES key by
+/// zero-padding the license key instead of HKDF, so accepting one silently reinstates both
+/// weaknesses. Note <c>alg</c> is NOT covered by the signature (the server signs <c>enc</c>'s
+/// bytes only), so it is attacker-malleable — which is exactly why it is gated rather than
+/// trusted.
 ///
 /// ENCRYPTED PAYLOAD LAYOUT. An encrypted <c>enc</c> is
 /// <c>"&lt;nonce_b64&gt;.&lt;ciphertext_b64&gt;"</c>: two separately base64-encoded halves, the
@@ -147,8 +148,9 @@ public sealed class MachineFile
         Certificate = certificate;
     }
 
-    /// <summary>Parses a PEM-wrapped <c>.machine</c> file. Does NOT verify the signature.</summary>
+    /// <summary>Parses a PEM-wrapped <c>.machine</c> file and enforces the <c>alg</c> grammar, the mandatory <c>+v2</c> marker and the encoding prefix. Does NOT verify the signature and does NOT cross-check the signing suffix against a scheme — that needs the caller's scheme and happens in <see cref="VerifyWithClaims"/>.</summary>
     /// <exception cref="OfflineFileFormatException">The PEM envelope or inner JSON is malformed.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> is not <c>&lt;base64|aes-256-gcm&gt;+&lt;signing-suffix&gt;+v2</c> — including every pre-v2 file.</exception>
     public static MachineFile Parse(string pem)
     {
         var inner = PemEnvelope.Strip(pem, BeginMarker, EndMarker);
@@ -172,7 +174,17 @@ public sealed class MachineFile
             throw new OfflineFileFormatException($"Machine file certificate JSON is malformed: {ex.Message}");
         }
 
-        return new MachineFile(cert ?? throw new OfflineFileFormatException("Machine file certificate JSON was null."));
+        if (cert is null)
+        {
+            throw new OfflineFileFormatException("Machine file certificate JSON was null.");
+        }
+
+        // The format gate — grammar, +v2 marker, encoding prefix — before any scheme, key or
+        // signature is known. The signing-suffix cross-check needs the caller's scheme and stays
+        // on the verifying path (audit D17).
+        _ = ParseAlg(cert.Alg);
+
+        return new MachineFile(cert);
     }
 
     /// <summary>Client-side validation mirroring the server's <c>422 TTL_INVALID</c> check — fails fast before a checkout request is even sent.</summary>
@@ -207,12 +219,7 @@ public sealed class MachineFile
     {
         RejectJwtRs256(scheme);
 
-        byte[] signature;
-        try
-        {
-            signature = Convert.FromBase64String(Certificate.Sig);
-        }
-        catch (FormatException)
+        if (!TryDecodeSignature(out var signature))
         {
             return false;
         }
@@ -227,6 +234,21 @@ public sealed class MachineFile
             LicenseScheme.EcdsaP256Sign => VerifyEcdsa(publicKey, message, signature),
             _ => throw new UnsupportedAlgorithmException($"Unsupported license scheme for machine file verification: {scheme}."),
         };
+    }
+
+    /// <summary>Base64-decodes <c>sig</c>; <see langword="false"/> (never a throw) when it is not base64, which every caller treats as a failed verification.</summary>
+    private bool TryDecodeSignature(out byte[] signature)
+    {
+        try
+        {
+            signature = Convert.FromBase64String(Certificate.Sig);
+            return true;
+        }
+        catch (FormatException)
+        {
+            signature = Array.Empty<byte>();
+            return false;
+        }
     }
 
     private static bool VerifyRsa(ReadOnlySpan<byte> publicKey, ReadOnlySpan<byte> message, ReadOnlySpan<byte> signature, RSASignaturePadding padding)
@@ -255,8 +277,8 @@ public sealed class MachineFile
     /// <param name="licenseKey">The license key — HKDF input keying material for an encrypted file.</param>
     /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file. Decryption fails closed (AES-GCM auth failure) if this doesn't match the machine the file was issued for.</param>
     /// <exception cref="SchemeNotSupportedException"><paramref name="scheme"/> is <see cref="LicenseScheme.Rsa2048JwtRs256"/>.</exception>
-    /// <exception cref="SignatureVerificationException">Signature verification failed, or decryption failed its authentication tag.</exception>
-    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> is malformed, pre-v2, or names a signing suffix that contradicts <paramref name="scheme"/>.</exception>
+    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted. As its subclass <see cref="LicenseKeyMismatchException"/>: the signature verified and the encrypted payload did not open under the supplied key material.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> names a signing suffix that contradicts <paramref name="scheme"/>. (A malformed or pre-v2 <c>alg</c> never reaches here — <see cref="Parse"/> refuses it.)</exception>
     /// <exception cref="LicenseFileExpiredException">The signature verified but the signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape, or carries no signed <c>meta</c> claims.</exception>
     public Machine VerifyAndDecrypt(LicenseScheme scheme, ReadOnlySpan<byte> publicKey, string licenseKey, string fingerprint)
@@ -309,9 +331,8 @@ public sealed class MachineFile
     }
 
     /// <summary>
-    /// Verifies a <c>.machine</c> file against a <see cref="SigningKeySet"/>, selecting the key by
-    /// the file's own signed <c>kid</c> claim so a file that predates a key rotation still
-    /// verifies.
+    /// Verifies a <c>.machine</c> file against a <see cref="SigningKeySet"/>, trying every trusted
+    /// key against the signature so a file that predates a key rotation still verifies.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -320,19 +341,19 @@ public sealed class MachineFile
     /// <c>key_id(account.ed25519_public_key…)</c> unconditionally
     /// (<c>check_out_machine.rs:127-129</c>), while the file's <em>signing</em> key is chosen by
     /// the license's scheme (<c>check_out_machine.rs:86-99</c>). For an RSA- or ECDSA-signed file
-    /// those are different keys, so the <c>kid</c> names a key that had no part in the signature —
-    /// and the key-set endpoint publishes Ed25519 keys only in any case. Those schemes raise
-    /// <see cref="SigningKeyNotApplicableException"/>; verify them with
+    /// those are different keys, and the key-set endpoint publishes Ed25519 keys only in any case.
+    /// Those schemes raise <see cref="SigningKeyNotApplicableException"/>; verify them with
     /// <see cref="VerifyWithClaims"/> and that scheme's own public key. Rotation only ever rotates
     /// the Ed25519 key, so there is no rotation for them to survive today.
     /// </para>
     /// <para>
-    /// Otherwise identical in contract to
-    /// <see cref="LicenseFile.VerifyWithKeySet"/>, including the ordering note: the payload is
-    /// decoded (and decrypted, under AES-GCM's own authentication) before the signature is checked,
-    /// because the <c>kid</c> lives inside it. The only value taken from unverified bytes is the
-    /// <c>kid</c>, and it can only select from keys the caller already supplied. No
-    /// <see cref="Machine"/> is ever produced from an unverified payload.
+    /// Otherwise identical in contract to <see cref="LicenseFile.VerifyWithKeySet"/>, including
+    /// the order of work: the signature is checked against every usable key over <c>enc</c>'s
+    /// string bytes before anything is split, decoded or decrypted — the same order the
+    /// scheme-taking path has always used. The <c>kid</c> is read only when no key verified, to
+    /// label the failure. After a verified signature an AES-GCM failure is
+    /// <see cref="LicenseKeyMismatchException"/>: wrong license key or wrong fingerprint, not a
+    /// forgery. No <see cref="Machine"/> is ever produced from an unverified payload.
     /// </para>
     /// </remarks>
     /// <param name="scheme">The license's signing scheme. Must be Ed25519 (or <see cref="LicenseScheme.None"/>, which signs with Ed25519).</param>
@@ -340,12 +361,14 @@ public sealed class MachineFile
     /// <param name="licenseKey">The license key — HKDF input keying material for an encrypted file.</param>
     /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file.</param>
     /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
-    /// <returns>The machine, the signed claims, and the key the file was verified against.</returns>
+    /// <returns>The machine, the signed claims, and the key that verified the signature.</returns>
     /// <exception cref="SigningKeyNotApplicableException"><paramref name="scheme"/> is RSA or ECDSA — its <c>kid</c> does not name its signing key.</exception>
     /// <exception cref="SchemeNotSupportedException"><paramref name="scheme"/> is <see cref="LicenseScheme.Rsa2048JwtRs256"/>.</exception>
-    /// <exception cref="UnknownSigningKeyException">The file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
-    /// <exception cref="UnpublishedSigningKeyException">The signing account has no Ed25519 public key recorded server-side.</exception>
-    /// <exception cref="SignatureVerificationException">The named key IS trusted and the signature still failed — the file is forged or corrupted.</exception>
+    /// <exception cref="UnknownSigningKeyException">No key verified and the file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
+    /// <exception cref="UnpublishedSigningKeyException">No key verified and the file's <c>kid</c> is <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/>.</exception>
+    /// <exception cref="SignatureVerificationException">No key verified and the <c>kid</c> names a held key or is unreadable — the file is forged or corrupted.</exception>
+    /// <exception cref="LicenseKeyMismatchException">A key verified; the AES-256-GCM payload did not open under <paramref name="licenseKey"/> and <paramref name="fingerprint"/>.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c>'s signing suffix contradicts <paramref name="scheme"/> (checked after the signature; a malformed or pre-v2 <c>alg</c> was refused by <see cref="Parse"/>).</exception>
     /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     public (Machine Machine, LicenseFileClaims Claims, SigningKey Key) VerifyWithKeySet(
         LicenseScheme scheme,
@@ -360,31 +383,50 @@ public sealed class MachineFile
         // machine-file verifier and `alg` cannot tell it apart from RSA_2048_PKCS1_SIGN.
         RejectJwtRs256(scheme);
 
-        // Refused BEFORE anything is decoded. For these schemes the kid names the account's
-        // Ed25519 key while the signature was made with an RSA or ECDSA key, so matching by kid
-        // would either fail confusingly or — worse — select a key that cannot verify the file and
-        // report it as forged.
+        // Refused BEFORE any key is tried. For these schemes the kid names the account's Ed25519
+        // key while the signature was made with an RSA or ECDSA key, and only Ed25519 keys are
+        // ever published, so no key in any set could verify the file — it would be reported as
+        // forged.
         if (scheme is not (LicenseScheme.Ed25519Sign or LicenseScheme.None))
         {
             throw new SigningKeyNotApplicableException(scheme);
         }
 
-        var payload = ParsePayload(DecodePayloadJson(scheme, licenseKey, fingerprint));
-        var claims = payload.Meta
-            ?? throw new OfflineFileFormatException(
-                "Machine file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
-
-        var (key, publicKeyBytes) = signingKeys.Resolve(claims.KeyId);
-
-        if (!Verify(scheme, publicKeyBytes))
+        // Signature first, against every usable key, over `enc`'s STRING bytes — before the
+        // encrypted halves are split, decoded or decrypted. (alg's grammar was gated by Parse.)
+        SigningKey? verifiedKey = null;
+        if (TryDecodeSignature(out var signature))
         {
-            throw new SignatureVerificationException(
-                $"Machine file signature verification failed against the key its 'kid' claim names ('{claims.KeyId}'), " +
-                "which IS in the supplied key set — the file is forged or corrupted.");
+            var message = Encoding.UTF8.GetBytes(Certificate.Enc);
+            verifiedKey = signingKeys.FindVerifyingKey(publicKey => Ed25519.Verify(publicKey, message, signature));
         }
 
+        if (verifiedKey is null)
+        {
+            throw signingKeys.UnverifiableFileFailure(TryReadUnverifiedKeyId(scheme, licenseKey, fingerprint), "Machine file");
+        }
+
+        // Only now is `enc` known to be authentic, so only now may any of it be decoded.
+        var payload = ParsePayload(DecodePayloadJson(scheme, licenseKey, fingerprint));
         var (machine, verifiedClaims) = FinishPayload(payload, nowUnixSeconds);
-        return (machine, verifiedClaims, key);
+        return (machine, verifiedClaims, verifiedKey);
+    }
+
+    /// <summary>
+    /// Reads the <c>kid</c> from a payload NO held key has vouched for, or <see langword="null"/>
+    /// when it cannot be read. Used only to label a failure — never to select a key.
+    /// </summary>
+    private string? TryReadUnverifiedKeyId(LicenseScheme scheme, string licenseKey, string fingerprint)
+    {
+        try
+        {
+            var keyId = ParsePayload(DecodePayloadJson(scheme, licenseKey, fingerprint)).Meta!.KeyId;
+            return string.IsNullOrEmpty(keyId) ? null : keyId;
+        }
+        catch (Exception ex) when (ex is OfflineFileFormatException or UnsupportedAlgorithmException or SignatureVerificationException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -484,8 +526,9 @@ public sealed class MachineFile
     }
 
     /// <summary>
-    /// Parses <c>alg</c> as <c>&lt;encoding&gt;+&lt;signing-suffix&gt;+v2</c> and returns whether
-    /// the payload is encrypted, rejecting anything that is not exactly that grammar.
+    /// Parses <c>alg</c> as <c>&lt;encoding&gt;+&lt;signing-suffix&gt;+v2</c> — grammar, version
+    /// marker and encoding prefix — and returns whether the payload is encrypted together with the
+    /// (not yet cross-checked) signing suffix. Runs at <see cref="Parse"/>, with no scheme in hand.
     /// </summary>
     /// <remarks>
     /// Split at the FIRST <c>+</c> for the encoding and the LAST <c>+</c> for the version marker;
@@ -494,7 +537,7 @@ public sealed class MachineFile
     /// a padded lookalike such as <c>xbase64+ed25519+v2junk</c> that a substring test waves
     /// through.
     /// </remarks>
-    private static bool ParseIsEncrypted(string alg, LicenseScheme scheme)
+    private static (bool IsEncrypted, string SigningSuffix) ParseAlg(string alg)
     {
         var firstPlus = alg.IndexOf('+');
         var lastPlus = alg.LastIndexOf('+');
@@ -511,7 +554,26 @@ public sealed class MachineFile
                 $"Unsupported machine file algorithm: '{alg}'. Only format {FormatVersionMarker} is accepted; a pre-v2 file carries no signed expiry and derives its key without HKDF.");
         }
 
-        var signingSuffix = alg[(firstPlus + 1)..lastPlus];
+        var encoding = alg[..firstPlus];
+        var isEncrypted = encoding switch
+        {
+            EncryptedEncodingPrefix => true,
+            PlainEncodingPrefix => false,
+            _ => throw new UnsupportedAlgorithmException(
+                $"Unsupported machine file algorithm: '{alg}'. Encoding prefix must be exactly '{PlainEncodingPrefix}' or '{EncryptedEncodingPrefix}'."),
+        };
+
+        return (isEncrypted, alg[(firstPlus + 1)..lastPlus]);
+    }
+
+    /// <summary>
+    /// The scheme-aware half: re-parses <c>alg</c> (same parser <see cref="Parse"/> ran) and
+    /// refuses a signing suffix that contradicts the caller's <paramref name="scheme"/>. The
+    /// suffix is a cross-check only; it never picks a verifier.
+    /// </summary>
+    private static bool ParseIsEncrypted(string alg, LicenseScheme scheme)
+    {
+        var (isEncrypted, signingSuffix) = ParseAlg(alg);
         var expectedSuffix = ExpectedSigningSuffix(scheme);
         if (!string.Equals(signingSuffix, expectedSuffix, StringComparison.Ordinal))
         {
@@ -519,14 +581,7 @@ public sealed class MachineFile
                 $"Machine file algorithm '{alg}' declares signing suffix '{signingSuffix}', but the license scheme {scheme} signs with '{expectedSuffix}'.");
         }
 
-        var encoding = alg[..firstPlus];
-        return encoding switch
-        {
-            EncryptedEncodingPrefix => true,
-            PlainEncodingPrefix => false,
-            _ => throw new UnsupportedAlgorithmException(
-                $"Unsupported machine file algorithm: '{alg}'. Encoding prefix must be exactly '{PlainEncodingPrefix}' or '{EncryptedEncodingPrefix}'."),
-        };
+        return isEncrypted;
     }
 
     /// <summary>
@@ -608,11 +663,18 @@ public sealed class MachineFile
         }
         catch (AuthenticationTagMismatchException ex)
         {
-            throw new SignatureVerificationException($"Machine file decryption failed authentication (wrong license key/fingerprint, or tampered payload): {ex.Message}");
+            // Every caller has verified the signature before reaching here (TryReadUnverifiedKeyId
+            // is the exception, and it swallows this). The ciphertext is the server's; the HKDF
+            // inputs — license key, fingerprint — are what can be wrong.
+            throw new LicenseKeyMismatchException(
+                "Machine file decryption failed authentication: the signature verified, so the payload is the server's, " +
+                "and the AES-256-GCM key derived from the supplied license key and fingerprint does not open it — " +
+                "the license key is wrong, or this file was issued for a different machine.",
+                ex);
         }
         catch (CryptographicException ex)
         {
-            throw new SignatureVerificationException($"Machine file decryption failed: {ex.Message}");
+            throw new LicenseKeyMismatchException($"Machine file decryption failed after a verified signature: {ex.Message}", ex);
         }
     }
 
