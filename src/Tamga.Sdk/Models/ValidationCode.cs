@@ -4,9 +4,11 @@ using System.Text.Json.Serialization;
 namespace Tamga.Sdk.Models;
 
 /// <summary>
-/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 24 wire values; 16 are
-/// reachable today (see per-member remarks) — an unrecognized/future wire value deserializes to
-/// <see cref="Unknown"/> rather than throwing (see <see cref="ValidationCodeConverter"/>).
+/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 24 wire values; 19 are
+/// reachable today and 5 are not — <see cref="NotFound"/>, <see cref="Banned"/>,
+/// <see cref="ComponentsScopeMismatch"/>, <see cref="ChecksumScopeMismatch"/>,
+/// <see cref="VersionScopeMismatch"/> (see per-member remarks). An unrecognized/future wire value
+/// deserializes to <see cref="Unknown"/> rather than throwing (see <see cref="ValidationCodeConverter"/>).
 /// </summary>
 [JsonConverter(typeof(ValidationCodeConverter))]
 public enum ValidationCode
@@ -68,13 +70,13 @@ public enum ValidationCode
     /// </summary>
     EntitlementsMissing,
 
-    /// <summary>Wire value <c>TOO_MANY_USERS</c>. ⛔ declared, never emitted.</summary>
+    /// <summary>Wire value <c>TOO_MANY_USERS</c>. ✅ reachable: emitted by all three validate endpoints when the license's user count exceeds <c>policy.max_users</c>. Never part of an activation rollback set — activation creates no users.</summary>
     TooManyUsers,
 
-    /// <summary>Wire value <c>HEARTBEAT_DEAD</c>. ⛔ declared, never emitted.</summary>
+    /// <summary>Wire value <c>HEARTBEAT_DEAD</c>. ✅ reachable: <see cref="Scope.Fingerprint"/> named a machine on the license whose heartbeat status is <c>DEAD</c> and the policy sets <c>require_heartbeat</c>. Not emitted without a fingerprint scope, and never by a heartbeat route.</summary>
     HeartbeatDead,
 
-    /// <summary>Wire value <c>HEARTBEAT_NOT_STARTED</c>. ⛔ declared, never emitted.</summary>
+    /// <summary>Wire value <c>HEARTBEAT_NOT_STARTED</c>. ✅ reachable: <see cref="Scope.Fingerprint"/> named a machine on the license that has never pinged (<c>NOT_STARTED</c>) and the policy sets <c>require_heartbeat</c>. Not emitted without a fingerprint scope.</summary>
     HeartbeatNotStarted,
 
     /// <summary>

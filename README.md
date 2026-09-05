@@ -58,10 +58,12 @@ var (machine, validation) = await client.ActivateMachineAsync(new CreateMachineR
 
 if (!validation.Valid)
 {
-    // Over-limit activations are rolled back for you: ActivateMachineAsync
-    // deletes the machine it just created when validation comes back
-    // TooManyMachines / TooManyCores / TooMuchMemory / TooMuchDisk /
-    // TooManyProcesses, unless you pass deleteOnOverLimit: false.
+    // Over-limit activations are rolled back for you — and then THROWN, as
+    // MachineOverLimitException (a TamgaLimitExceededException carrying the
+    // ValidationResult and the deleted machine id), so you never hold a machine
+    // whose row is gone. This branch is for the other invalid codes (Expired,
+    // Suspended, …), where the machine is real. Pass deleteOnOverLimit: false
+    // to keep the old tuple return instead.
     Console.WriteLine($"Activation rejected: {validation.Code}");
     return;
 }
@@ -116,6 +118,13 @@ if (activation.AlreadyActivated)
     Console.WriteLine($"already activated as {activation.Machine.Id}");
 }
 ```
+
+The result also says how the machine was found and what became of it:
+`RolledBack` is `true` when this call created the machine, validation came back
+over-limit and the row was deleted again — `Machine` is then a tombstone. Since
+2.1.2 a same-license conflict is resolved by the id the server names in the
+409's `meta.machineId` (one `GET /machines/{id}`, fingerprint re-checked);
+without it the license-scoped search runs as before.
 
 Two things it deliberately will not do. It never deletes an adopted machine, even
 when validation comes back over-limit — that seat belongs to something this call
@@ -289,6 +298,14 @@ server's `> 0 && <= 31536000` range check
   use it instead of the local clock, which on an offline client is under the
   attacker's control. The `ttl`/`expiry` fields returned in the checkout
   response envelope remain metadata only — they are not signed.
+- **A wrong license key is not a forgery.** After a verified signature an
+  AES-256-GCM failure can only mean the wrong key material —
+  `LicenseKeyMismatchException`, a `SignatureVerificationException` subclass —
+  on both file formats and on both the single-key and key-set paths. The
+  key-set paths verify the signature against every held key before decoding a
+  byte of `enc`; the `kid` only labels a failure
+  (`UnknownSigningKeyException` / `UnpublishedSigningKeyException` /
+  `SignatureVerificationException`).
 - **`alg` is parsed, never sniffed, and format v2 is mandatory.** A machine
   file's `alg` is `<encoding>+<signing-suffix>+v2`; the encoding runs to the
   first `+`, the version marker follows the last `+`, and the suffix is what
@@ -355,13 +372,14 @@ around:
   (`401 LICENSE_SUSPENDED`) and expired licenses under a `REVOKE_ACCESS` policy
   (`401 LICENSE_EXPIRED`) are refused at the same front door, before any
   per-endpoint check runs.
-- **16 of the 24 `ValidationCode` values are reachable.** `NotFound` is
+- **19 of the 24 `ValidationCode` values are reachable.** `NotFound` is
   modeled but never emitted (the server returns HTTP 404 directly instead),
-  and `Banned`, `TooManyUsers`, `HeartbeatDead`, `HeartbeatNotStarted`,
-  `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and `VersionScopeMismatch`
-  exist for forward-compatibility only. Do not build UX around those.
-  `EntitlementsMissing` and `FingerprintScopeMismatch` **are** reachable now —
-  see the next entry.
+  and `Banned`, `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and
+  `VersionScopeMismatch` exist for forward-compatibility only. `TooManyUsers`
+  (all three validate endpoints, `policy.max_users`), `HeartbeatDead` and
+  `HeartbeatNotStarted` (a `Scope.Fingerprint` on a `require_heartbeat`
+  policy) **are** reachable as of the API's audit patch, as are
+  `EntitlementsMissing` and `FingerprintScopeMismatch` — see the next entry.
 - **`Scope`: six fields enforced, two rejected.** `Product`, `Policy`, `User`,
   `Environment`, `Entitlements` and `Fingerprint` all constrain validation.
   `Entitlements` takes entitlement **codes** (not the UUIDs the attach/detach
@@ -462,7 +480,9 @@ around:
   derived from the timestamp that write set. `ping-heartbeat` sets
   `last_heartbeat_at = NOW()` and so answers `ALIVE` or `RESURRECTED`;
   `CreateMachineAsync` leaves the column unset and `ResetHeartbeatAsync` nulls
-  it, both giving `NOT_STARTED`; validation never emits `HEARTBEAT_DEAD`. So an
+  it, both giving `NOT_STARTED`; validation emits `HEARTBEAT_DEAD` only for a
+  `Scope.Fingerprint` on a `require_heartbeat` policy, which is a read, not a
+  heartbeat route. So an
   `if (status == Dead)` branch written against `HeartbeatScheduler` is
   unreachable code, and re-activation placed inside one never runs. The rule
   covers every status, not just `DEAD`: the loop ends on cancellation, on

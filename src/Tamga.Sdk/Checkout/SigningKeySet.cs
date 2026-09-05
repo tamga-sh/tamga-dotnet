@@ -39,12 +39,11 @@ namespace Tamga.Sdk.Checkout;
 /// <see cref="SigningKeyNotApplicableException"/>.
 /// </para>
 /// <para>
-/// <b>An empty set is not an error.</b> <c>account_signing_keys</c> is written only by
-/// <c>rotate_ed25519</c>, which backfills the account's current key on its way through
-/// (<c>signing_keys.rs:74-107</c>), so an account that has never rotated has no rows at all and the
-/// endpoint answers <c>{"data": []}</c>. Pin the account's published key with
-/// <see cref="SigningKey.FromEd25519PublicKey"/> and verification works before the first rotation
-/// as well as after it.
+/// <b>An empty set is not an error, but it is no longer the norm.</b> An account created before
+/// the server's key-set backfill may still answer <c>{"data": []}</c> from a server that has not
+/// run its startup sweep; after it, every account publishes its active key from creation. Pin the
+/// account's published key with <see cref="SigningKey.FromEd25519PublicKey"/> and verification
+/// works before the backfill as well as after it.
 /// </para>
 /// </remarks>
 public sealed class SigningKeySet
@@ -170,12 +169,7 @@ public sealed class SigningKeySet
     public int Count => UsableKeys.Count;
 
     /// <summary>Whether the set holds no usable key at all.</summary>
-    /// <remarks>
-    /// Not an error in itself — every verification through such a set reports
-    /// <see cref="UnknownSigningKeyException"/>, which is the honest answer — but it is almost
-    /// always a sign that the fetch or the pinned key list is wrong. See the type-level note on why
-    /// an empty published set is normal for an account that has never rotated.
-    /// </remarks>
+    /// <remarks>Not an error in itself — every verification through such a set reports <see cref="UnknownSigningKeyException"/> (or <see cref="SignatureVerificationException"/> when the <c>kid</c> is unreadable), which is the honest answer — but it is almost always a sign that the fetch or the pinned key list is wrong: after the server's key-set backfill every account publishes at least its active key. See the type-level note.</remarks>
     public bool IsEmpty => Count == 0;
 
     /// <summary>

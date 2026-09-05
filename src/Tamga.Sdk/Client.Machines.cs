@@ -659,8 +659,8 @@ public sealed partial class TamgaClient
 /// bearing writes obey it — <see cref="TamgaClient.PingHeartbeatAsync"/> sets the timestamp to
 /// <c>NOW()</c> (<c>ALIVE</c>, or <c>RESURRECTED</c> when a death event predates it), while
 /// <see cref="TamgaClient.CreateMachineAsync"/> leaves it unset and
-/// <see cref="TamgaClient.ResetHeartbeatAsync"/> nulls it (both <c>NOT_STARTED</c>). License
-/// validation likewise never emits <c>HEARTBEAT_DEAD</c>.
+/// <see cref="TamgaClient.ResetHeartbeatAsync"/> nulls it (both <c>NOT_STARTED</c>).
+/// License validation emits <c>HEARTBEAT_DEAD</c> only for a <c>scope.fingerprint</c> on a policy with <c>require_heartbeat</c> — a read, never this loop's ping.
 /// </para>
 /// <para>
 /// <b>A response built off a READ can report <c>DEAD</c>, and one such route already reaches

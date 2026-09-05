@@ -32,9 +32,8 @@ public enum HeartbeatStatus
     /// ⚠ <b>Unreachable from every write route.</b> <c>ping-heartbeat</c> writes
     /// <c>last_heartbeat_at = NOW()</c> and derives the status from that same timestamp
     /// (<c>ALIVE</c>/<c>RESURRECTED</c>); <c>create</c> never sets the column and
-    /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>); and license validation never emits
-    /// <c>HEARTBEAT_DEAD</c>. The single place this value reaches a caller today is the machine
-    /// inside a checked-out <c>.machine</c> file
+    /// <c>reset-heartbeat</c> nulls it (<c>NOT_STARTED</c>);
+    /// License validation emits <see cref="ValidationCode.HeartbeatDead"/> only for a <see cref="Scope.Fingerprint"/> on a policy with <c>require_heartbeat</c>, never off a heartbeat route. Where this value reaches a caller as a <see cref="HeartbeatStatus"/>: the machine inside a checked-out <c>.machine</c> file
     /// (<see cref="Checkout.MachineFile.VerifyAndDecrypt(Tamga.Sdk.Models.LicenseScheme, System.ReadOnlySpan{byte}, string, string)"/>), which is resolved through a read
     /// query. Treat <c>if (status == Dead)</c> written against a ping result as dead code.
     ///

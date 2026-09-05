@@ -482,8 +482,9 @@ public sealed record Policy
 
     /// <summary>The maximum number of users allowed under this policy.</summary>
     /// <remarks>
-    /// Modeled for completeness. <see cref="ValidationCode.TooManyUsers"/> has no construction site
-    /// server-side, so exceeding this limit is not currently reported by validation.
+    /// Enforced: all three validate endpoints answer <see cref="ValidationCode.TooManyUsers"/>
+    /// when the license's user count exceeds this. Activation creates no users, so it is never an
+    /// activation-rollback code.
     /// </remarks>
     [JsonPropertyName("max_users")]
     public int? MaxUsers { get; init; }

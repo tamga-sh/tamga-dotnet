@@ -51,10 +51,12 @@ public sealed partial class TamgaClient
     /// admin token. An offline verifier that only works while it has a network is not offline.
     /// </para>
     /// <para>
-    /// <b>An empty result is normal, not an error.</b> <c>account_signing_keys</c> is written only
-    /// by <c>rotate_ed25519</c>, which backfills the account's current key on its way through, so
-    /// an account that has never rotated has no rows and this returns an empty list. Pin the
-    /// account's published key rather than treating that as a failure.
+    /// <b>An empty result is possible but no longer the norm.</b> Every account created after the
+    /// server's key-set backfill publishes its active key from creation, and a startup sweep
+    /// backfills the accounts that predate it. An account on a server that has not run that sweep
+    /// still answers <c>{"data": []}</c>. Treat an empty list as "not yet backfilled", pin the
+    /// account's published key with <see cref="SigningKeySet.FromPublicKeys(string[])"/>, and
+    /// verification works either way.
     /// </para>
     /// <para>
     /// <c>algorithm</c> is <c>ed25519</c> on every row today: the table's <c>CHECK</c> also admits
