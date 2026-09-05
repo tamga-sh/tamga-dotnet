@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Tamga.Sdk.Models;
 
@@ -24,14 +25,16 @@ public sealed record TamgaApiError
 
     /// <summary>The HTTP status code associated with this error.</summary>
     /// <remarks>
-    /// The server sends this as a JSON <em>string</em> (<c>"status": "422"</c>), not a number.
-    /// Binding it to a <see cref="ushort"/> only works because
-    /// <see cref="TamgaJsonOptions.Default"/> sets
-    /// <see cref="System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString"/> —
-    /// deserialize this type with any other options and the whole envelope will throw. Prefer
-    /// <see cref="Code"/> for dispatch regardless; the status only narrows the class of failure.
+    /// The server sends this as a JSON <em>string</em> (<c>"status": "422"</c>, from
+    /// <c>status.as_u16().to_string()</c>), not a number. The
+    /// <see cref="JsonNumberHandlingAttribute"/> on this property is what binds that string to a
+    /// <see cref="ushort"/>, so the envelope decodes under <em>any</em>
+    /// <see cref="JsonSerializerOptions"/> — not only <see cref="TamgaJsonOptions.Default"/>, which
+    /// used to be the single option set it worked under (audit D18). A JSON number binds too.
+    /// Prefer <see cref="Code"/> for dispatch regardless; the status only narrows the class of failure.
     /// </remarks>
     [JsonPropertyName("status")]
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public ushort Status { get; init; }
 
     /// <summary>Stable machine-readable error code — dispatch on this, not <see cref="Detail"/>.</summary>
@@ -49,6 +52,25 @@ public sealed record TamgaApiError
     /// <summary>The request field that caused this error, if applicable.</summary>
     [JsonPropertyName("source")]
     public TamgaApiErrorSource? Source { get; init; }
+
+    /// <summary>
+    /// The error's <c>meta</c> object, verbatim, or <see langword="null"/> when the server sent
+    /// none.
+    /// </summary>
+    /// <remarks>
+    /// Exactly one error carries a <c>meta</c> today: <c>409 FINGERPRINT_TAKEN</c> from
+    /// <c>POST /machines</c> sends <c>{"machineId": "&lt;uuid&gt;"}</c>, and only when the machine
+    /// holding the fingerprint is on the license named in the request. A conflict with a machine
+    /// on another license (under <c>UNIQUE_PER_POLICY</c> / <c>UNIQUE_PER_ACCOUNT</c>) carries no
+    /// <c>meta</c> at all. <see cref="FingerprintTakenException.ExistingMachineId"/> reads it.
+    /// Kept as a <see cref="JsonElement"/> rather than a typed record so a future error's
+    /// <c>meta</c> binds without an SDK change. It round-trips through
+    /// <see cref="TamgaJsonOptions.Default"/> (omitted when null). The raw-body recovery path in
+    /// <see cref="TamgaTransport"/> does not reconstruct it: an envelope that failed to bind yields
+    /// an exception whose <c>Meta</c> is <see langword="null"/>.
+    /// </remarks>
+    [JsonPropertyName("meta")]
+    public JsonElement? Meta { get; init; }
 
     /// <summary>Convenience accessor for <c>Source.Pointer</c>.</summary>
     [JsonIgnore]
@@ -134,9 +156,33 @@ public sealed class CheckInNotRequiredException : TamgaApiException
 public sealed class FingerprintTakenException : TamgaApiException
 {
     /// <summary>Constructs from a parsed API error.</summary>
-    public FingerprintTakenException(TamgaApiError error) : base(error) { }
+    public FingerprintTakenException(TamgaApiError error) : base(error)
+        => ExistingMachineId = ReadExistingMachineId(error);
 
-    internal FingerprintTakenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
+    internal FingerprintTakenException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure)
+        => ExistingMachineId = ReadExistingMachineId(error);
+
+    /// <summary>
+    /// The id of the machine that already holds the fingerprint, when the server named it in
+    /// <c>meta.machineId</c>; otherwise <see langword="null"/>.
+    /// </summary>
+    /// <remarks>
+    /// The server names it exactly when that machine is on the license the request asked for, so
+    /// a non-null value is safe to adopt — <see cref="TamgaClient.ActivateMachineIdempotentAsync"/>
+    /// reads it by id instead of searching. <see langword="null"/> means one of: an older server
+    /// that sends no <c>meta</c>; a cross-license conflict (never carries one); a component
+    /// conflict; or a <c>meta</c> that did not hold a UUID string under <c>machineId</c>. None of
+    /// those throw — the conflict itself is still the information.
+    /// </remarks>
+    public Guid? ExistingMachineId { get; }
+
+    private static Guid? ReadExistingMachineId(TamgaApiError error) =>
+        error.Meta is { ValueKind: JsonValueKind.Object } meta
+        && meta.TryGetProperty("machineId", out var id)
+        && id.ValueKind == JsonValueKind.String
+        && Guid.TryParse(id.GetString(), out var machineId)
+            ? machineId
+            : null;
 }
 
 /// <summary><c>409 PID_TAKEN</c> — a process PID is already in use on the target machine.</summary>
@@ -206,6 +252,38 @@ public sealed class SchemeNotSupportedException : TamgaApiException
         : base(new TamgaApiError { Status = 422, Code = "SCHEME_NOT_SUPPORTED", Detail = detail })
     {
     }
+}
+
+/// <summary>
+/// <c>422 SIGNING_KEY_MISSING</c> — the account has no Ed25519 signing key, so the server cannot
+/// sign what was asked of it: a license check-out, a machine check-out, or an offline proof.
+/// </summary>
+/// <remarks>
+/// Not retryable and not fixable from the client: the account's key has to be populated
+/// server-side. Every account created after the server's key-set backfill has one from creation,
+/// and the startup sweep backfills the accounts that predate it, so this is expected only against
+/// a server that has not run that sweep. Those routes used to answer <c>500</c> for the same
+/// condition; the typed <c>422</c> is what a client can act on.
+/// </remarks>
+public sealed class SigningKeyMissingException : TamgaApiException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public SigningKeyMissingException(TamgaApiError error) : base(error) { }
+
+    internal SigningKeyMissingException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
+}
+
+/// <summary>
+/// <c>422 SECRET_KEY_MISSING</c> — the account has no secret key, so the server cannot mint a
+/// token.
+/// </summary>
+/// <remarks>Same class of failure as <see cref="SigningKeyMissingException"/>: an account-level precondition, fixed server-side, never by retrying.</remarks>
+public sealed class SecretKeyMissingException : TamgaApiException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public SecretKeyMissingException(TamgaApiError error) : base(error) { }
+
+    internal SecretKeyMissingException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure) { }
 }
 
 /// <summary><c>422 DATASET_INVALID</c> — the <c>dataset</c> object supplied to offline-proof generation was rejected.</summary>
@@ -661,6 +739,8 @@ public static class TamgaErrorMapper
         "LICENSE_NOT_ENCRYPTED" => new LicenseNotEncryptedException(error, errorBodyParseFailure),
         "LICENSE_KEY_MISSING" => new LicenseKeyMissingException(error, errorBodyParseFailure),
         "SCHEME_NOT_SUPPORTED" => new SchemeNotSupportedException(error, errorBodyParseFailure),
+        "SIGNING_KEY_MISSING" => new SigningKeyMissingException(error, errorBodyParseFailure),
+        "SECRET_KEY_MISSING" => new SecretKeyMissingException(error, errorBodyParseFailure),
         "DATASET_INVALID" => new DatasetInvalidException(error, errorBodyParseFailure),
         "MACHINE_LIMIT_EXCEEDED" => new MachineLimitExceededException(error, errorBodyParseFailure),
         "CORE_LIMIT_EXCEEDED" => new CoreLimitExceededException(error, errorBodyParseFailure),

@@ -60,6 +60,115 @@ public class ErrorsTests
         Assert.Equal((ushort)422, error.Status);
     }
 
+    /// <summary>
+    /// D18. The string <c>status</c> used to bind ONLY under <see cref="TamgaJsonOptions.Default"/>,
+    /// because the flag lived on the options and not on the property. Any other option set — a
+    /// caller logging an envelope with <c>new JsonSerializerOptions()</c>, a middleware, a test —
+    /// threw on the whole envelope. The property now carries its own number handling.
+    /// </summary>
+    [Fact]
+    public void TamgaApiError_BindsTheServersStringStatus_UnderDefaultOptions()
+    {
+        // Exact wire shape (status.as_u16().to_string()): `status` is a STRING.
+        const string json = """
+        {"errors":[{"id":"1","status":"422","code":"TTL_INVALID","title":"Unprocessable Entity","detail":"ttl must be > 0 and <= 31536000","source":{"pointer":"/data/meta/ttl"}}]}
+        """;
+
+        var envelope = JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(json, new JsonSerializerOptions());
+
+        var error = Assert.Single(envelope!.Errors);
+        Assert.Equal((ushort)422, error.Status);
+        Assert.Equal("TTL_INVALID", error.Code);
+        Assert.Equal("/data/meta/ttl", error.Pointer);
+    }
+
+    [Fact]
+    public void TamgaApiError_BindsANumericStatus_UnderDefaultOptions()
+    {
+        // A proxy or a future server emitting a JSON number binds the same way, under the same
+        // plain options — the attribute widens what is accepted, it does not narrow it.
+        const string json = """
+        {"errors":[{"id":"1","status":422,"code":"TTL_INVALID","title":"t","detail":"d"}]}
+        """;
+
+        var envelope = JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(json, new JsonSerializerOptions());
+
+        Assert.Equal((ushort)422, Assert.Single(envelope!.Errors).Status);
+    }
+
+    /// <summary>
+    /// The API now attaches <c>meta: {"machineId": "&lt;uuid&gt;"}</c> to a same-license
+    /// <c>409 FINGERPRINT_TAKEN</c>. The envelope keeps it verbatim and the typed exception reads it.
+    /// </summary>
+    [Fact]
+    public void FingerprintTakenException_ReadsTheExistingMachineId_FromMeta()
+    {
+        var machineId = Guid.NewGuid();
+        // Exact wire shape from the API plan: string `status`, `meta` is {"machineId": "<uuid>"}.
+        var json = "{\"errors\":[{\"id\":\"1\",\"status\":\"409\",\"code\":\"FINGERPRINT_TAKEN\",\"title\":\"Conflict\",\"detail\":\"This fingerprint is already activated\",\"meta\":{\"machineId\":\"" + machineId + "\"}}]}";
+
+        var error = Assert.Single(JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(json, TamgaJsonOptions.Default)!.Errors);
+        Assert.NotNull(error.Meta);
+        Assert.Equal(JsonValueKind.Object, error.Meta!.Value.ValueKind);
+
+        var ex = Assert.IsType<FingerprintTakenException>(TamgaErrorMapper.ToException(error));
+        Assert.Equal(machineId, ex.ExistingMachineId);
+    }
+
+    [Theory]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d"}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d","meta":null}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d","meta":{}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d","meta":{"machineId":"not-a-uuid"}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d","meta":{"machineId":42}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"d","meta":"unexpected"}]}""")]
+    public void FingerprintTakenException_ExistingMachineId_IsNull_WhenMetaIsAbsentOrNotAMachineId(string json)
+    {
+        // A cross-license conflict carries no meta at all; anything malformed must degrade to
+        // "not named", never throw — the conflict itself is the information the caller needs.
+        var error = Assert.Single(JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(json, TamgaJsonOptions.Default)!.Errors);
+
+        var ex = Assert.IsType<FingerprintTakenException>(TamgaErrorMapper.ToException(error));
+
+        Assert.Null(ex.ExistingMachineId);
+    }
+
+    [Fact]
+    public void TamgaApiError_Meta_RoundTripsThroughTheSharedOptions()
+    {
+        var original = new TamgaApiError
+        {
+            Status = 409,
+            Code = "FINGERPRINT_TAKEN",
+            Detail = "d",
+            Meta = JsonSerializer.SerializeToElement(new { machineId = "0192b3e0-0000-7000-8000-000000000001" }, TamgaJsonOptions.Default),
+        };
+
+        var json = JsonSerializer.Serialize(original, TamgaJsonOptions.Default);
+        var roundTripped = JsonSerializer.Deserialize<TamgaApiError>(json, TamgaJsonOptions.Default)!;
+
+        Assert.Contains("\"meta\":{\"machineId\":\"0192b3e0-0000-7000-8000-000000000001\"}", json, StringComparison.Ordinal);
+        Assert.Equal("0192b3e0-0000-7000-8000-000000000001", roundTripped.Meta!.Value.GetProperty("machineId").GetString());
+
+        // No meta → omitted on the wire (WhenWritingNull), null after the round trip.
+        var bare = JsonSerializer.Serialize(new TamgaApiError { Status = 422, Code = "X", Detail = "d" }, TamgaJsonOptions.Default);
+        Assert.DoesNotContain("meta", bare, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ToException_MapsTheTwoNew422s_ToTheirOwnTypes_OutsideTheLimitAndAuthFamilies()
+    {
+        var signing = TamgaErrorMapper.ToException(new TamgaApiError { Status = 422, Code = "SIGNING_KEY_MISSING", Detail = "d" });
+        var secret = TamgaErrorMapper.ToException(new TamgaApiError { Status = 422, Code = "SECRET_KEY_MISSING", Detail = "d" });
+
+        Assert.IsType<SigningKeyMissingException>(signing);
+        Assert.IsType<SecretKeyMissingException>(secret);
+        Assert.IsNotAssignableFrom<TamgaLimitExceededException>(signing);
+        Assert.IsNotAssignableFrom<TamgaLicenseAuthException>(signing);
+        Assert.Equal("SIGNING_KEY_MISSING", signing.Error.Code);
+        Assert.Equal("SECRET_KEY_MISSING", secret.Error.Code);
+    }
+
     public static IEnumerable<object[]> KnownCodeMappings()
     {
         yield return new object[] { "CHECK_IN_NOT_REQUIRED", typeof(CheckInNotRequiredException) };
@@ -83,6 +192,8 @@ public class ErrorsTests
         yield return new object[] { "UNAUTHORIZED", typeof(TamgaUnauthorizedException) };
         yield return new object[] { "FORBIDDEN", typeof(TamgaForbiddenException) };
         yield return new object[] { "INTERNAL_SERVER_ERROR", typeof(TamgaInternalServerErrorException) };
+        yield return new object[] { "SIGNING_KEY_MISSING", typeof(SigningKeyMissingException) };
+        yield return new object[] { "SECRET_KEY_MISSING", typeof(SecretKeyMissingException) };
     }
 
     [Theory]

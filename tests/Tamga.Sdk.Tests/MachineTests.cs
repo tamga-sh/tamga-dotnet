@@ -38,6 +38,24 @@ public class MachineTests
     }
 
     [Fact]
+    public async Task CreateMachineAsync_ExposesTheConflictingMachineId_WhenTheServerNamesIt()
+    {
+        var (client, handler) = MakeClient();
+        var existing = Guid.NewGuid();
+        // Exact wire shape: string `status`, `meta` = {"machineId": "<uuid>"} — sent only when the
+        // machine holding the fingerprint is on the license named in the request.
+        var errorBody = "{\"errors\":[{\"id\":\"1\",\"status\":\"409\",\"code\":\"FINGERPRINT_TAKEN\",\"title\":\"Conflict\",\"detail\":\"This fingerprint is already activated\",\"meta\":{\"machineId\":\"" + existing + "\"}}]}";
+
+        handler.Enqueue(HttpStatusCode.Conflict, errorBody);
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            client.CreateMachineAsync(new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = Guid.NewGuid() }));
+
+        Assert.Equal(existing, ex.ExistingMachineId);
+        Assert.Null(ex.ErrorBodyParseFailure);
+    }
+
+    [Fact]
     public async Task CreateMachineAsync_SendsJsonApiRelationshipToLicense()
     {
         var (client, handler) = MakeClient();

@@ -339,15 +339,14 @@ public sealed record JsonApiListMeta
 /// from JSON strings on deserialize.
 /// </summary>
 /// <remarks>
-/// CRITICAL — <see cref="JsonNumberHandling.AllowReadingFromString"/> is load-bearing, not a
-/// nicety. The server serializes a JSON:API error's <c>status</c> as a <em>string</em>
-/// (<c>status.as_u16().to_string()</c>), so the wire shape is <c>"status": "422"</c>, not
-/// <c>"status": 422</c>. Without this flag, <see cref="TamgaApiError.Status"/>
-/// (a <see cref="ushort"/>) fails to bind, the whole <see cref="TamgaApiErrorEnvelope"/>
-/// deserialization throws, and <see cref="TamgaErrorMapper.ToException(TamgaApiError, Exception?)"/>
-/// is never reached — every
-/// typed exception in this SDK becomes unreachable and every API error degrades to a bare
-/// <see cref="TamgaApiException"/> whose <c>code</c> is the HTTP status name. Do not remove it.
+/// <see cref="JsonNumberHandling.AllowReadingFromString"/> is set here for every quoted number the
+/// server may emit. It is no longer the only thing standing between a JSON:API error and the typed
+/// exception hierarchy: <see cref="TamgaApiError.Status"/> carries its own
+/// <see cref="JsonNumberHandlingAttribute"/>, so the server's string <c>status</c>
+/// (<c>status.as_u16().to_string()</c> → <c>"status": "422"</c>) binds under any options
+/// (audit D18). Keep the flag here regardless — the envelope is not the only payload with quoted
+/// numbers, and <see cref="TamgaErrorMapper.ToException(TamgaApiError, Exception?)"/> is reached
+/// only when the whole envelope binds.
 /// </remarks>
 public static class TamgaJsonOptions
 {
