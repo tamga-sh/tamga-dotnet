@@ -379,26 +379,63 @@ public class MachineFileTests
     {
         var payloadJson = BuildPayloadJson(Guid.NewGuid(), "fp-abc");
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
-        // `alg` is deliberately junk here: the refusal must land BEFORE anything parses it, so a
-        // file that could never pass the format gate still fails on the scheme first.
-        var pem = BuildPem(enc, new byte[64], "rsa-sha256");
+        // A well-formed v2 alg with the suffix the server emits for BOTH RSA schemes. Parse's
+        // format gate passes; the scheme refusal is the first thing the verifying path does.
+        var pem = BuildPem(enc, new byte[64], "base64+rsa-sha256+v2");
         var machineFile = MachineFile.Parse(pem);
 
         Assert.Throws<SchemeNotSupportedException>(() => machineFile.Verify(LicenseScheme.Rsa2048JwtRs256, new byte[32]));
     }
 
     [Fact]
-    public void VerifyAndDecrypt_Throws_SchemeNotSupported_ForRsaJwtRs256_BeforeAttemptingDecryption()
+    public void VerifyAndDecrypt_Throws_SchemeNotSupported_ForRsaJwtRs256_BeforeAttemptingSignatureOrDecryption()
     {
         var payloadJson = BuildPayloadJson(Guid.NewGuid(), "fp-abc");
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(payloadJson));
-        // Same point as above, and additionally pre-v2: neither gate may fire before the scheme
-        // refusal, or the error a caller sees depends on which malformation they hit first.
-        var pem = BuildPem(enc, new byte[64], "aes-256-gcm+rsa-sha256");
+        // Encrypted alg over a plain (non dot-separated) enc with a junk signature: neither the
+        // signature check nor the decrypt may run before the scheme refusal.
+        var pem = BuildPem(enc, new byte[64], "aes-256-gcm+rsa-sha256+v2");
         var machineFile = MachineFile.Parse(pem);
 
         Assert.Throws<SchemeNotSupportedException>(() =>
             machineFile.VerifyAndDecrypt(LicenseScheme.Rsa2048JwtRs256, new byte[32], "key", "fp"));
+    }
+
+    /// <summary>
+    /// D17 for machine files: the grammar, the +v2 marker and the encoding prefix are checked at
+    /// Parse, before any scheme or key is known. The signing-suffix cross-check needs the caller's
+    /// scheme and stays on the verifying path.
+    /// </summary>
+    [Theory]
+    [InlineData("base64+ed25519")]
+    [InlineData("aes-256-gcm+rsa-sha256")]
+    [InlineData("rsa-sha256")]
+    [InlineData("base64+ed25519+v3")]
+    [InlineData("base64+ed25519+V2")]
+    [InlineData("base64+ed25519+v2junk")]
+    [InlineData("xbase64+ed25519+v2")]
+    [InlineData("base64-ed25519-v2")]
+    [InlineData("base64")]
+    [InlineData("")]
+    public void Parse_RefusesAnAlgOutsideTheV2Grammar_BeforeAnyKeyOrSignatureWork(string alg)
+    {
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "fp-abc")));
+        var (_, sign, _) = MakeSigner(LicenseScheme.Ed25519Sign);
+
+        Assert.Throws<UnsupportedAlgorithmException>(() => MachineFile.Parse(BuildPem(enc, sign(Encoding.UTF8.GetBytes(enc)), alg)));
+    }
+
+    [Fact]
+    public void Parse_LeavesTheSigningSuffixCrossCheck_ToTheVerifyingPath()
+    {
+        // Grammar-valid, but the suffix contradicts the scheme the caller will pass. Parse has no
+        // scheme, so it cannot judge this; VerifyAndDecrypt does, after the signature.
+        var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(BuildPayloadJson(Guid.NewGuid(), "fp-abc")));
+        var (publicKey, sign, _) = MakeSigner(LicenseScheme.Ed25519Sign);
+        var file = MachineFile.Parse(BuildPem(enc, sign(Encoding.UTF8.GetBytes(enc)), "base64+ecdsa-p256+v2"));
+
+        Assert.Throws<UnsupportedAlgorithmException>(() =>
+            file.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKey, "k", "fp", IssuedAt));
     }
 
     [Fact]

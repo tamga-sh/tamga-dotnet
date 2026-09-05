@@ -88,11 +88,12 @@ public sealed record MachineFilePayload
 /// the signing suffix is everything between. Both <c>aes-256-gcm</c> and <c>rsa-pss-sha256</c>
 /// contain hyphens and the suffix itself can contain them, so nothing here may be recovered by
 /// substring sniffing — a <c>Contains("base64")</c> test happily accepts <c>xbase64+ed25519+v3</c>.
-/// A file with no <c>+v2</c> is rejected outright: a v1 file carried no <c>exp</c> inside its
-/// signature and derived its AES key by zero-padding the license key instead of HKDF, so accepting
-/// one silently reinstates both weaknesses. Note <c>alg</c> is NOT covered by the signature (the
-/// server signs <c>enc</c>'s bytes only), so it is attacker-malleable — which is exactly why it is
-/// gated rather than trusted.
+/// A file with no <c>+v2</c> is rejected outright by <c>Parse</c>, before any scheme or key is
+/// known: a v1 file carried no <c>exp</c> inside its signature and derived its AES key by
+/// zero-padding the license key instead of HKDF, so accepting one silently reinstates both
+/// weaknesses. Note <c>alg</c> is NOT covered by the signature (the server signs <c>enc</c>'s
+/// bytes only), so it is attacker-malleable — which is exactly why it is gated rather than
+/// trusted.
 ///
 /// ENCRYPTED PAYLOAD LAYOUT. An encrypted <c>enc</c> is
 /// <c>"&lt;nonce_b64&gt;.&lt;ciphertext_b64&gt;"</c>: two separately base64-encoded halves, the
@@ -147,8 +148,9 @@ public sealed class MachineFile
         Certificate = certificate;
     }
 
-    /// <summary>Parses a PEM-wrapped <c>.machine</c> file. Does NOT verify the signature.</summary>
+    /// <summary>Parses a PEM-wrapped <c>.machine</c> file and enforces the <c>alg</c> grammar, the mandatory <c>+v2</c> marker and the encoding prefix. Does NOT verify the signature and does NOT cross-check the signing suffix against a scheme — that needs the caller's scheme and happens in <see cref="VerifyWithClaims"/>.</summary>
     /// <exception cref="OfflineFileFormatException">The PEM envelope or inner JSON is malformed.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> is not <c>&lt;base64|aes-256-gcm&gt;+&lt;signing-suffix&gt;+v2</c> — including every pre-v2 file.</exception>
     public static MachineFile Parse(string pem)
     {
         var inner = PemEnvelope.Strip(pem, BeginMarker, EndMarker);
@@ -172,7 +174,17 @@ public sealed class MachineFile
             throw new OfflineFileFormatException($"Machine file certificate JSON is malformed: {ex.Message}");
         }
 
-        return new MachineFile(cert ?? throw new OfflineFileFormatException("Machine file certificate JSON was null."));
+        if (cert is null)
+        {
+            throw new OfflineFileFormatException("Machine file certificate JSON was null.");
+        }
+
+        // The format gate — grammar, +v2 marker, encoding prefix — before any scheme, key or
+        // signature is known. The signing-suffix cross-check needs the caller's scheme and stays
+        // on the verifying path (audit D17).
+        _ = ParseAlg(cert.Alg);
+
+        return new MachineFile(cert);
     }
 
     /// <summary>Client-side validation mirroring the server's <c>422 TTL_INVALID</c> check — fails fast before a checkout request is even sent.</summary>
@@ -256,7 +268,7 @@ public sealed class MachineFile
     /// <param name="fingerprint">The target machine's fingerprint — HKDF <c>info</c> for an encrypted file. Decryption fails closed (AES-GCM auth failure) if this doesn't match the machine the file was issued for.</param>
     /// <exception cref="SchemeNotSupportedException"><paramref name="scheme"/> is <see cref="LicenseScheme.Rsa2048JwtRs256"/>.</exception>
     /// <exception cref="SignatureVerificationException">Signature verification failed, or decryption failed its authentication tag.</exception>
-    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> is malformed, pre-v2, or names a signing suffix that contradicts <paramref name="scheme"/>.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> names a signing suffix that contradicts <paramref name="scheme"/>. (A malformed or pre-v2 <c>alg</c> never reaches here — <see cref="Parse"/> refuses it.)</exception>
     /// <exception cref="LicenseFileExpiredException">The signature verified but the signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape, or carries no signed <c>meta</c> claims.</exception>
     public Machine VerifyAndDecrypt(LicenseScheme scheme, ReadOnlySpan<byte> publicKey, string licenseKey, string fingerprint)
@@ -484,8 +496,9 @@ public sealed class MachineFile
     }
 
     /// <summary>
-    /// Parses <c>alg</c> as <c>&lt;encoding&gt;+&lt;signing-suffix&gt;+v2</c> and returns whether
-    /// the payload is encrypted, rejecting anything that is not exactly that grammar.
+    /// Parses <c>alg</c> as <c>&lt;encoding&gt;+&lt;signing-suffix&gt;+v2</c> — grammar, version
+    /// marker and encoding prefix — and returns whether the payload is encrypted together with the
+    /// (not yet cross-checked) signing suffix. Runs at <see cref="Parse"/>, with no scheme in hand.
     /// </summary>
     /// <remarks>
     /// Split at the FIRST <c>+</c> for the encoding and the LAST <c>+</c> for the version marker;
@@ -494,7 +507,7 @@ public sealed class MachineFile
     /// a padded lookalike such as <c>xbase64+ed25519+v2junk</c> that a substring test waves
     /// through.
     /// </remarks>
-    private static bool ParseIsEncrypted(string alg, LicenseScheme scheme)
+    private static (bool IsEncrypted, string SigningSuffix) ParseAlg(string alg)
     {
         var firstPlus = alg.IndexOf('+');
         var lastPlus = alg.LastIndexOf('+');
@@ -511,7 +524,26 @@ public sealed class MachineFile
                 $"Unsupported machine file algorithm: '{alg}'. Only format {FormatVersionMarker} is accepted; a pre-v2 file carries no signed expiry and derives its key without HKDF.");
         }
 
-        var signingSuffix = alg[(firstPlus + 1)..lastPlus];
+        var encoding = alg[..firstPlus];
+        var isEncrypted = encoding switch
+        {
+            EncryptedEncodingPrefix => true,
+            PlainEncodingPrefix => false,
+            _ => throw new UnsupportedAlgorithmException(
+                $"Unsupported machine file algorithm: '{alg}'. Encoding prefix must be exactly '{PlainEncodingPrefix}' or '{EncryptedEncodingPrefix}'."),
+        };
+
+        return (isEncrypted, alg[(firstPlus + 1)..lastPlus]);
+    }
+
+    /// <summary>
+    /// The scheme-aware half: re-parses <c>alg</c> (same parser <see cref="Parse"/> ran) and
+    /// refuses a signing suffix that contradicts the caller's <paramref name="scheme"/>. The
+    /// suffix is a cross-check only; it never picks a verifier.
+    /// </summary>
+    private static bool ParseIsEncrypted(string alg, LicenseScheme scheme)
+    {
+        var (isEncrypted, signingSuffix) = ParseAlg(alg);
         var expectedSuffix = ExpectedSigningSuffix(scheme);
         if (!string.Equals(signingSuffix, expectedSuffix, StringComparison.Ordinal))
         {
@@ -519,14 +551,7 @@ public sealed class MachineFile
                 $"Machine file algorithm '{alg}' declares signing suffix '{signingSuffix}', but the license scheme {scheme} signs with '{expectedSuffix}'.");
         }
 
-        var encoding = alg[..firstPlus];
-        return encoding switch
-        {
-            EncryptedEncodingPrefix => true,
-            PlainEncodingPrefix => false,
-            _ => throw new UnsupportedAlgorithmException(
-                $"Unsupported machine file algorithm: '{alg}'. Encoding prefix must be exactly '{PlainEncodingPrefix}' or '{EncryptedEncodingPrefix}'."),
-        };
+        return isEncrypted;
     }
 
     /// <summary>

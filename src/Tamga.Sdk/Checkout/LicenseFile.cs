@@ -55,8 +55,8 @@ public sealed record LicenseFileCertificate
 ///
 /// Format v2 is mandatory: <c>alg</c> must end in <c>+v2</c> and the payload must carry the signed
 /// <c>meta</c> claims (<c>iat</c>/<c>exp</c>/<c>jti</c>/<c>kid</c>, see
-/// <see cref="LicenseFileClaims"/>). A pre-v2 file is rejected outright with no fallback path —
-/// see <see cref="VerifyWithClaims"/>.
+/// <see cref="LicenseFileClaims"/>). A pre-v2 file is rejected outright by <see cref="Parse"/>,
+/// before any key or signature work — see <see cref="Parse"/>.
 ///
 /// GOTCHA: <c>includes</c> is always <c>[]</c> server-side — this SDK does not model an
 /// "embedded relationships via checkout" feature. GOTCHA: checkout <c>id</c> is a fresh UUIDv7 per
@@ -72,6 +72,18 @@ public sealed class LicenseFile
     private const string BeginMarker = "-----BEGIN LICENSE FILE-----";
     private const string EndMarker = "-----END LICENSE FILE-----";
 
+    /// <summary>The mandatory format-version marker after the last <c>+</c> of <c>alg</c>.</summary>
+    private const string FormatVersionMarker = "v2";
+
+    /// <summary>The <c>alg</c> encoding prefix for a plain (unencrypted) payload.</summary>
+    private const string PlainEncodingPrefix = "base64";
+
+    /// <summary>The <c>alg</c> encoding prefix for an AES-256-GCM payload.</summary>
+    private const string EncryptedEncodingPrefix = "aes-256-gcm";
+
+    /// <summary>The only signing suffix a license file can carry — license files are Ed25519-signed regardless of the license's scheme.</summary>
+    private const string SigningSuffix = "ed25519";
+
     /// <summary>The parsed, unverified <c>{enc, sig, alg}</c> certificate.</summary>
     public LicenseFileCertificate Certificate { get; }
 
@@ -80,8 +92,20 @@ public sealed class LicenseFile
         Certificate = certificate;
     }
 
-    /// <summary>Parses a PEM-wrapped <c>.lic</c> file. Does NOT verify the signature — call <see cref="Verify"/> or <see cref="VerifyAndDecrypt(System.ReadOnlySpan{byte}, string)"/> separately.</summary>
+    /// <summary>
+    /// Parses a PEM-wrapped <c>.lic</c> file and enforces its format: <c>alg</c> must be exactly
+    /// <c>base64+ed25519+v2</c> or <c>aes-256-gcm+ed25519+v2</c>. Does NOT verify the signature —
+    /// call <see cref="Verify"/> or <see cref="VerifyAndDecrypt(System.ReadOnlySpan{byte}, string)"/> separately.
+    /// </summary>
+    /// <remarks>
+    /// The format gate lives here, ahead of every verifying entry point, so a pre-v2 or
+    /// non-Ed25519 file is refused with one exception type before any key or signature work — not
+    /// with whichever of three exceptions the first method to run happened to hit (audit D17).
+    /// <c>alg</c> is outside the signature and therefore attacker-malleable, which is why it is
+    /// gated rather than trusted; nothing here reads <c>enc</c>.
+    /// </remarks>
     /// <exception cref="OfflineFileFormatException">The PEM envelope or inner JSON is malformed.</exception>
+    /// <exception cref="UnsupportedAlgorithmException"><c>alg</c> is not one of the two format-v2, Ed25519 values above — including every pre-v2 file.</exception>
     public static LicenseFile Parse(string pem)
     {
         var inner = PemEnvelope.Strip(pem, BeginMarker, EndMarker);
@@ -105,7 +129,16 @@ public sealed class LicenseFile
             throw new OfflineFileFormatException($"License file certificate JSON is malformed: {ex.Message}");
         }
 
-        return new LicenseFile(cert ?? throw new OfflineFileFormatException("License file certificate JSON was null."));
+        if (cert is null)
+        {
+            throw new OfflineFileFormatException("License file certificate JSON was null.");
+        }
+
+        // The format gate, before any verifier exists to run. Result discarded: the same parser
+        // decides plain-vs-encrypted later, from the same string.
+        _ = ParseIsEncrypted(cert.Alg);
+
+        return new LicenseFile(cert);
     }
 
     /// <summary>
@@ -113,20 +146,10 @@ public sealed class LicenseFile
     /// <see langword="true"/>/<see langword="false"/> rather than throwing — callers that need a
     /// fail-closed exception should use <see cref="VerifyAndDecrypt(System.ReadOnlySpan{byte}, string)"/>.
     /// </summary>
-    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> does not contain <c>"ed25519"</c>.</exception>
+    /// <remarks>Signature only. <c>alg</c> was already enforced by <see cref="Parse"/>, so every instance this runs on is a format-v2 Ed25519 file.</remarks>
     public bool Verify(ReadOnlySpan<byte> publicKey)
     {
-        if (!Certificate.Alg.Contains("ed25519", StringComparison.Ordinal))
-        {
-            throw new UnsupportedAlgorithmException($"Unsupported license file algorithm: '{Certificate.Alg}'. Only ed25519-signed license files are supported.");
-        }
-
-        byte[] signature;
-        try
-        {
-            signature = Convert.FromBase64String(Certificate.Sig);
-        }
-        catch (FormatException)
+        if (!TryDecodeSignature(out var signature))
         {
             return false;
         }
@@ -136,6 +159,21 @@ public sealed class LicenseFile
         // in this SDK — see type-level remarks above.
         var message = Encoding.UTF8.GetBytes(Certificate.Enc);
         return Ed25519.Verify(publicKey, message, signature);
+    }
+
+    /// <summary>Base64-decodes <c>sig</c>; <see langword="false"/> (never a throw) when it is not base64, which every caller treats as a failed verification.</summary>
+    private bool TryDecodeSignature(out byte[] signature)
+    {
+        try
+        {
+            signature = Convert.FromBase64String(Certificate.Sig);
+            return true;
+        }
+        catch (FormatException)
+        {
+            signature = Array.Empty<byte>();
+            return false;
+        }
     }
 
     /// <summary>
@@ -154,7 +192,7 @@ public sealed class LicenseFile
     /// across both cases.
     /// </param>
     /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted — or decryption failed its authentication tag.</exception>
-    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> is not a recognized value, or does not end in <c>+v2</c> (a pre-v2 file).</exception>
+    /// <exception cref="UnsupportedAlgorithmException">Cannot occur on a parsed instance — <see cref="Parse"/> refuses any <c>alg</c> that is not format-v2 Ed25519; listed so a caller catching it around Parse sees the same type here.</exception>
     /// <exception cref="LicenseFileExpiredException">The signature verified but the signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape, or carries no signed <c>meta</c> claims.</exception>
     public License VerifyAndDecrypt(ReadOnlySpan<byte> publicKey, string licenseKey)
@@ -182,7 +220,7 @@ public sealed class LicenseFile
     /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
     /// <returns>The license carried by the file, together with the claims that were inside the signed bytes.</returns>
     /// <exception cref="SignatureVerificationException">Signature verification or payload decryption failed.</exception>
-    /// <exception cref="UnsupportedAlgorithmException"><see cref="LicenseFileCertificate.Alg"/> is unrecognized or pre-v2.</exception>
+    /// <exception cref="UnsupportedAlgorithmException">Cannot occur on a parsed instance — <see cref="Parse"/> refuses any <c>alg</c> that is not format-v2 Ed25519; listed so a caller catching it around Parse sees the same type here.</exception>
     /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The payload is malformed or carries no signed <c>meta</c> claims.</exception>
     public (License License, LicenseFileClaims Claims) VerifyWithClaims(
@@ -292,16 +330,17 @@ public sealed class LicenseFile
         => VerifyWithKeySet(signingKeys, licenseKey, nowUnixSeconds).License;
 
     /// <summary>
-    /// Decodes <c>enc</c> to the payload JSON bytes: base64-decode, enforce the <c>+v2</c> gate,
-    /// then decrypt or pass through by <c>alg</c>.
+    /// Decodes <c>enc</c> to the payload JSON bytes: base64-decode, then decrypt or pass through
+    /// by <c>alg</c>.
     /// </summary>
     /// <remarks>
-    /// Extracted so the single-key and key-set paths share one implementation — two copies would
-    /// drift, and a drift in the <c>+v2</c> gate is a silently reintroduced permanent-file bug.
-    /// The order of checks is exactly what the single-key path always did.
+    /// One implementation for the single-key and key-set paths. The <c>alg</c> parser it calls is
+    /// the same one <see cref="Parse"/> ran, so the gate cannot drift between construction and use.
     /// </remarks>
     private byte[] DecodePayloadJson(string licenseKey)
     {
+        var isEncrypted = ParseIsEncrypted(Certificate.Alg);
+
         byte[] payloadBytes;
         try
         {
@@ -312,24 +351,53 @@ public sealed class LicenseFile
             throw new OfflineFileFormatException($"License file 'enc' is not valid base64: {ex.Message}");
         }
 
-        // The +v2 suffix is load-bearing: a v1 file carried no expiry inside its signature, so
-        // accepting one would hand back the permanent-file problem v2 exists to close.
-        if (!Certificate.Alg.EndsWith("+v2", StringComparison.Ordinal))
+        return isEncrypted ? DecryptPayload(payloadBytes, licenseKey) : payloadBytes;
+    }
+
+    /// <summary>
+    /// Parses <c>alg</c> as <c>&lt;encoding&gt;+ed25519+v2</c> and returns whether the payload is
+    /// encrypted, rejecting anything that is not exactly that grammar.
+    /// </summary>
+    /// <remarks>
+    /// Anchored at the FIRST and LAST <c>+</c>, like <see cref="MachineFile"/>'s parser, so
+    /// <c>xbase64+ed25519+v2</c>, <c>base64+ed25519+v2junk</c> and <c>base64+ed25519</c> are all
+    /// refused — the substring tests this replaced (<c>Contains("ed25519")</c>,
+    /// <c>EndsWith("+v2")</c>, <c>Contains("aes-256-gcm")</c>) waved every one of those through.
+    /// The <c>+v2</c> marker is load-bearing: a v1 file carried no expiry inside its signature, so
+    /// accepting one hands back the permanent-file problem v2 exists to close.
+    /// </remarks>
+    private static bool ParseIsEncrypted(string alg)
+    {
+        var firstPlus = alg.IndexOf('+');
+        var lastPlus = alg.LastIndexOf('+');
+        if (firstPlus <= 0 || lastPlus <= firstPlus)
         {
-            throw new UnsupportedAlgorithmException($"Unsupported license file algorithm: '{Certificate.Alg}'.");
+            throw new UnsupportedAlgorithmException(
+                $"Unsupported license file algorithm: '{alg}'. Expected '{PlainEncodingPrefix}+{SigningSuffix}+{FormatVersionMarker}' or '{EncryptedEncodingPrefix}+{SigningSuffix}+{FormatVersionMarker}'.");
         }
 
-        if (Certificate.Alg.Contains("aes-256-gcm", StringComparison.Ordinal))
+        var version = alg[(lastPlus + 1)..];
+        if (!string.Equals(version, FormatVersionMarker, StringComparison.Ordinal))
         {
-            return DecryptPayload(payloadBytes, licenseKey);
+            throw new UnsupportedAlgorithmException(
+                $"Unsupported license file algorithm: '{alg}'. Only format {FormatVersionMarker} is accepted; a pre-v2 file carries no signed expiry.");
         }
 
-        if (Certificate.Alg.Contains("base64", StringComparison.Ordinal))
+        var signingSuffix = alg[(firstPlus + 1)..lastPlus];
+        if (!string.Equals(signingSuffix, SigningSuffix, StringComparison.Ordinal))
         {
-            return payloadBytes;
+            throw new UnsupportedAlgorithmException(
+                $"Unsupported license file algorithm: '{alg}'. Only {SigningSuffix}-signed license files exist; the signing suffix is '{signingSuffix}'.");
         }
 
-        throw new UnsupportedAlgorithmException($"Unsupported license file algorithm: '{Certificate.Alg}'.");
+        var encoding = alg[..firstPlus];
+        return encoding switch
+        {
+            EncryptedEncodingPrefix => true,
+            PlainEncodingPrefix => false,
+            _ => throw new UnsupportedAlgorithmException(
+                $"Unsupported license file algorithm: '{alg}'. Encoding prefix must be exactly '{PlainEncodingPrefix}' or '{EncryptedEncodingPrefix}'."),
+        };
     }
 
     /// <summary>Deserializes the payload JSON and rejects a payload carrying no signed claims.</summary>

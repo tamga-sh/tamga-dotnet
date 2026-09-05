@@ -450,18 +450,16 @@ public class SigningKeyRotationTests
     }
 
     /// <summary>
-    /// The <c>alg</c> gate still applies on the key-set path: an encoding prefix that is neither
-    /// <c>base64</c> nor <c>aes-256-gcm</c> is refused, not guessed at.
+    /// The <c>alg</c> gate is ahead of every entry point, the key-set one included: an encoding
+    /// prefix that is neither <c>base64</c> nor <c>aes-256-gcm</c> is refused at Parse, not guessed at.
     /// </summary>
     [Fact]
-    public void LicenseFile_KeySetPath_RejectsAnUnrecognisedEncodingPrefix()
+    public void LicenseFile_AnUnrecognisedEncodingPrefix_IsRefusedAtParse_BeforeTheKeySetIsConsulted()
     {
         using var signer = NewSigner();
-        var file = LicenseFile.Parse(BuildLicensePem(
-            signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "rot13+ed25519+v2"));
+        var pem = BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "rot13+ed25519+v2");
 
-        Assert.Throws<UnsupportedAlgorithmException>(
-            () => file.VerifyWithKeySet(SigningKeySet.FromPublicKeys(signer.PublicKeyB64), "unused", ClockBeforeAnyExpiry));
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(pem));
     }
 
     /// <summary>
@@ -553,11 +551,11 @@ public class SigningKeyRotationTests
         Assert.Equal("LIC-ROTATE-1", file.VerifyAndDecrypt(signer.PublicKey, "unused", ClockBeforeAnyExpiry).Key);
         Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(other.PublicKey, "unused", ClockBeforeAnyExpiry));
 
-        // A pre-v2 file is still refused before anything else, and the signature is still checked
-        // first on this path — a v1 alg with a good signature is UnsupportedAlgorithm, not a
-        // signature failure.
-        var v1 = LicenseFile.Parse(BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "base64+ed25519"));
-        Assert.Throws<UnsupportedAlgorithmException>(() => v1.VerifyAndDecrypt(signer.PublicKey, "unused", ClockBeforeAnyExpiry));
+        // A pre-v2 file is refused before anything else — at Parse now, so no verifier and no key
+        // is ever involved. A v1 alg with a perfectly good signature is UnsupportedAlgorithm, not
+        // a signature failure, on every entry point.
+        var v1 = BuildLicensePem(signer, LicensePayload(Guid.NewGuid(), signer.Kid), alg: "base64+ed25519");
+        Assert.Throws<UnsupportedAlgorithmException>(() => LicenseFile.Parse(v1));
     }
 
     /// <summary>

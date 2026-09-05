@@ -68,7 +68,7 @@ public class ClientTests
         }.ToJsonString();
         var enc = Convert.ToBase64String(Encoding.UTF8.GetBytes(innerPayload));
         var sig = Convert.ToBase64String(SignatureAlgorithm.Ed25519.Sign(key, Encoding.UTF8.GetBytes(enc)));
-        var certJson = new JsonObject { ["enc"] = enc, ["sig"] = sig, ["alg"] = "base64+ed25519" }.ToJsonString();
+        var certJson = new JsonObject { ["enc"] = enc, ["sig"] = sig, ["alg"] = "base64+ed25519+v2" }.ToJsonString();
         var pem = $"-----BEGIN LICENSE FILE-----\n{Convert.ToBase64String(Encoding.UTF8.GetBytes(certJson))}\n-----END LICENSE FILE-----";
 
         var responseBody = new JsonObject
