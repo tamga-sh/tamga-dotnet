@@ -128,21 +128,27 @@ without it the license-scoped search runs as before.
 
 Two things it deliberately will not do. It never deletes an adopted machine, even
 when validation comes back over-limit — that seat belongs to something this call
-did not create. And it never adopts a machine from a *different* license: the
-lookup is scoped to `LicenseId`, so under a policy whose
-`MachineUniquenessStrategy` is `UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the
-scopes where a conflict can come from another license — the scoped search finds
-nothing and the original `FingerprintTakenException` surfaces.
+did not create. And it never adopts a machine from a *different* license. When
+the server names the conflicting machine via `meta.machineId` (fast path), the
+server's own contract ensures it is on the requested license, not verified
+client-side. When no `meta.machineId` is present or that machine 404s or its
+fingerprint doesn't match (fallback), the lookup is client-scoped to `LicenseId`
+via `filter[license]` — so under a policy whose `MachineUniquenessStrategy` is
+`UNIQUE_PER_POLICY` or `UNIQUE_PER_ACCOUNT` — the scopes where a conflict can
+come from another license — the scoped search finds nothing and the original
+`FingerprintTakenException` surfaces.
 
-That is the correct outcome, not a gap. Returning another license's machine would
-have this client heartbeat and check out a machine its own license does not own
-while its own `machines_count` stayed at zero, and since the machine resource
-carries no `license_id` it could never detect that. Sharing one fingerprint's
-seat across licenses is precisely what the wider uniqueness scopes exist to
-prevent. Nothing is lost either: all three strategies' duplicate checks include
-the caller's own license rows, so a genuine re-activation conflicts — and is
-found — under every one of them. `AlreadyActivated` therefore means "this license
-already has this machine", the strong reading.
+That is the correct outcome, not a gap. Why this matters: the machine resource
+carries no `license_id` (removed in 2.1.0), so if another license's machine were
+returned, a caller could never detect it and would heartbeat and check out a
+machine its own license does not own while its own `machines_count` stayed at
+zero — seat-sharing across licenses, the exact harm the wider uniqueness scopes
+exist to prevent. The server's contract on the fast path prevents this; the
+client's `filter[license]` scoping on the fallback prevents it. All three
+strategies' duplicate checks do include the caller's own license rows, so a
+genuine re-activation conflicts — and is found — under every one of them.
+`AlreadyActivated` therefore means "this license already has this machine", the
+strong reading.
 
 ### Reads
 
