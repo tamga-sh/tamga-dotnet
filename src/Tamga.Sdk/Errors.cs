@@ -633,6 +633,70 @@ public sealed class TooManyProcessesException : TamgaLimitExceededException
 }
 
 /// <summary>
+/// Thrown by <see cref="TamgaClient.ActivateMachineAsync"/> when the create succeeded, license
+/// validation then answered an over-limit code, and — because <c>deleteOnOverLimit</c> was
+/// <see langword="true"/> — the machine was deleted again. Built client-side; no server error
+/// occurred.
+/// </summary>
+/// <remarks>
+/// <para>
+/// Exists because handing back the deleted machine as a success value was a trap (audit D15): a
+/// caller that did not read <c>validation.Valid</c> — or did, and carried on — held a
+/// <see cref="Models.Machine"/> whose row no longer existed, and every heartbeat on it answered
+/// <c>404</c>. The rollback is now a failure, and it carries everything the tuple did:
+/// <see cref="Validation"/> is the verdict, <see cref="DeletedMachineId"/> is the row that is gone.
+/// </para>
+/// <para>
+/// <see cref="TamgaApiException.Error"/> is synthesized the way
+/// <see cref="SchemeNotSupportedException(string)"/> synthesizes its own. <c>Status</c> is
+/// <c>422</c>, what the create-time refusal of the same overage answers. <c>Code</c> is the
+/// validate-time wire value the server actually sent — one of <c>TOO_MANY_MACHINES</c>,
+/// <c>TOO_MANY_CORES</c>, <c>TOO_MUCH_MEMORY</c>, <c>TOO_MUCH_DISK</c>, <c>TOO_MANY_PROCESSES</c> —
+/// never a <c>*_LIMIT_EXCEEDED</c> code no server emitted, so
+/// <see cref="TamgaErrorMapper"/> does not and must not produce this type.
+/// <see cref="TamgaLimitExceededException.EquivalentValidationCode"/> equals
+/// <see cref="Validation"/>'s <see cref="ValidationResult.Code"/>, so a single
+/// <c>catch (TamgaLimitExceededException)</c> handles the create-time and the validate-time
+/// overage with one value.
+/// </para>
+/// <para>
+/// Only <see cref="TamgaClient.ActivateMachineAsync"/> throws it.
+/// <see cref="TamgaClient.ActivateMachineIdempotentAsync"/> reports the same outcome as
+/// <see cref="Models.MachineActivation.RolledBack"/> instead, because its result type has room to
+/// say so.
+/// </para>
+/// </remarks>
+public sealed class MachineOverLimitException : TamgaLimitExceededException
+{
+    /// <summary>Constructs from the validation verdict that triggered the rollback and the id of the machine that was deleted.</summary>
+    /// <exception cref="ArgumentNullException"><paramref name="validation"/> is <see langword="null"/>.</exception>
+    public MachineOverLimitException(ValidationResult validation, Guid deletedMachineId)
+        : base(BuildError(validation, deletedMachineId), validation.Code)
+    {
+        Validation = validation;
+        DeletedMachineId = deletedMachineId;
+    }
+
+    /// <summary>The license validation that reported the overage — the same value the tuple overload used to return.</summary>
+    public ValidationResult Validation { get; }
+
+    /// <summary>The id of the machine this activation created and then deleted. Its row no longer exists; do not heartbeat, check out or cache it.</summary>
+    public Guid DeletedMachineId { get; }
+
+    private static TamgaApiError BuildError(ValidationResult validation, Guid deletedMachineId)
+    {
+        ArgumentNullException.ThrowIfNull(validation);
+        var code = ValidationCodeConverter.ToWireString(validation.Code);
+        return new TamgaApiError
+        {
+            Status = 422,
+            Code = code,
+            Detail = $"Machine {deletedMachineId} was created, license validation answered {code} ({validation.Detail}), and the machine was deleted again.",
+        };
+    }
+}
+
+/// <summary>
 /// <c>401 LICENSE_SUSPENDED</c> — license-key authentication refused because the license is
 /// suspended. Raised at the front door, before any per-endpoint check, so every call on that
 /// credential fails this way.
@@ -702,6 +766,7 @@ public abstract class TamgaLicenseAuthException : TamgaApiException
 /// <see cref="TamgaApiError.Code"/> only.
 /// </summary>
 /// <remarks>
+/// <para>
 /// <c>429 TOO_MANY_REQUESTS</c> is deliberately absent from the table below. It is a real,
 /// returned status, but it is absorbed one layer down: <see cref="TamgaTransport"/> retries a
 /// rate-limited request with capped <c>Retry-After</c>/jittered backoff, so by the time an error
@@ -709,6 +774,12 @@ public abstract class TamgaLicenseAuthException : TamgaApiException
 /// spent and a distinct exception type would only tell the caller something it can no longer act
 /// on. It surfaces as the catch-all <see cref="TamgaApiException"/> with
 /// <see cref="TamgaApiError.Status"/> <c>429</c> intact.
+/// </para>
+/// <para>
+/// <see cref="MachineOverLimitException"/> is likewise absent, for the opposite reason: it is
+/// built client-side by <see cref="TamgaClient.ActivateMachineAsync"/> from a validate-time
+/// <c>meta.code</c>, which is not an error-envelope code.
+/// </para>
 /// </remarks>
 public static class TamgaErrorMapper
 {

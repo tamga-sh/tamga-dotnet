@@ -101,13 +101,14 @@ public class MachineTests
     }
 
     /// <summary>
-    /// The overage path, which the create-time check did NOT replace. The server applies the
-    /// policy's overage strategy to its create-time limit check, so under <c>ALLOW_ACCESS</c> or
-    /// <c>ALLOW_1_25X_OVERAGE</c> the machine row IS written and only <c>validate</c> objects —
-    /// which is exactly the case the create → validate → rollback dance exists for.
+    /// The overage path, which the create-time check did NOT replace: under ALLOW_ACCESS or
+    /// ALLOW_1_25X_OVERAGE the row IS written and only validate objects. After the rollback the
+    /// machine no longer exists, so returning it as a success value was a trap (audit D15): a
+    /// caller that carried on heartbeated a row that answers 404. The rollback is now a failure
+    /// that carries everything the tuple used to.
     /// </summary>
     [Fact]
-    public async Task ActivateMachineAsync_StillRollsBack_WhenOverageLetsTheCreateSucceed_AndValidateReportsTheLimit()
+    public async Task ActivateMachineAsync_ThrowsMachineOverLimit_AfterRollingBack_InsteadOfReturningTheDeletedMachine()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
@@ -129,41 +130,53 @@ public class MachineTests
         // 3) rollback.
         handler.Enqueue(HttpStatusCode.NoContent, "");
 
-        var (machine, validation) = await client.ActivateMachineAsync(
-            new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId });
+        var ex = await Assert.ThrowsAsync<MachineOverLimitException>(() =>
+            client.ActivateMachineAsync(new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId }));
 
         Assert.Equal(3, handler.Requests.Count);
         Assert.Equal(HttpMethod.Delete, handler.Requests[2].Request.Method);
         Assert.Contains(machineId.ToString(), handler.Requests[2].Request.RequestUri!.AbsolutePath);
-        Assert.Equal(machineId, machine.Id);
-        Assert.Equal(ValidationCode.TooManyMachines, validation.Code);
-        Assert.Equal(6, validation.License.MachinesCount);
-        Assert.Equal(5, validation.License.MaxMachines);
+
+        // Everything the old tuple carried is on the exception, plus the fact that the row is gone.
+        Assert.Equal(machineId, ex.DeletedMachineId);
+        Assert.Equal(ValidationCode.TooManyMachines, ex.Validation.Code);
+        Assert.Equal(6, ex.Validation.License.MachinesCount);
+        Assert.Equal(5, ex.Validation.License.MaxMachines);
+
+        // It is a limit-exceeded exception like the create-time 422s, so one catch clause covers
+        // both over-limit paths, and Error.Code is what the server actually said.
+        Assert.IsAssignableFrom<TamgaLimitExceededException>(ex);
+        Assert.Equal(ValidationCode.TooManyMachines, ex.EquivalentValidationCode);
+        Assert.Equal("TOO_MANY_MACHINES", ex.Error.Code);
+        Assert.Equal((ushort)422, ex.Error.Status);
+        Assert.Contains(machineId.ToString(), ex.Error.Detail, StringComparison.Ordinal);
     }
 
+    /// <summary>
+    /// <c>deleteOnOverLimit: false</c> keeps the old contract exactly: no DELETE, the tuple comes
+    /// back, and the caller decides what to do with a machine that still exists.
+    /// </summary>
     [Fact]
-    public async Task ActivateMachineAsync_DeletesMachine_OnOverLimitValidationCode()
+    public async Task ActivateMachineAsync_ReturnsTheTuple_AndDeletesNothing_WhenDeleteOnOverLimitIsFalse()
     {
         var (client, handler) = MakeClient();
         var machineId = Guid.NewGuid();
         var licenseId = Guid.NewGuid();
 
-        // 1) create machine
         handler.Enqueue(HttpStatusCode.OK, MachineResourceJson(machineId));
-        // 2) validate -> over limit
         handler.Enqueue(HttpStatusCode.OK, $$"""
         {
             "data": { "type": "licenses", "id": "{{licenseId}}", "attributes": { "key": "L", "suspended": false, "uses": 0 } },
             "meta": { "ts": "2024-01-01T00:00:00Z", "valid": false, "detail": "over limit", "code": "TOO_MANY_MACHINES" }
         }
         """);
-        // 3) delete machine
-        handler.Enqueue(HttpStatusCode.NoContent, "");
 
-        var (machine, validation) = await client.ActivateMachineAsync(new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId });
+        var (machine, validation) = await client.ActivateMachineAsync(
+            new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId },
+            deleteOnOverLimit: false);
 
-        Assert.Equal(3, handler.Requests.Count);
-        Assert.Equal(HttpMethod.Delete, handler.Requests[2].Request.Method);
+        Assert.Equal(2, handler.Requests.Count);
+        Assert.DoesNotContain(handler.Requests, r => r.Request.Method == HttpMethod.Delete);
         Assert.Equal(machineId, machine.Id);
         Assert.Equal(ValidationCode.TooManyMachines, validation.Code);
     }

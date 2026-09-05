@@ -277,4 +277,34 @@ public class ErrorsTests
         // The catch-all base stays concrete on purpose: an unmodeled `code` maps to it directly.
         Assert.False(typeof(TamgaApiException).IsAbstract);
     }
+
+    /// <summary>
+    /// Built client-side, like <see cref="SchemeNotSupportedException(string)"/>: no server 422
+    /// occurred, so the mapper never produces it, and Error.Code is the validate-time value the
+    /// server DID send rather than a *_LIMIT_EXCEEDED code it did not.
+    /// </summary>
+    [Fact]
+    public void MachineOverLimitException_IsAClientSideLimitExceededException()
+    {
+        var validation = new ValidationResult
+        {
+            License = new License { Id = Guid.NewGuid() },
+            Meta = new ValidationMeta { Ts = DateTimeOffset.UnixEpoch, Valid = false, Detail = "over limit", Code = ValidationCode.TooMuchDisk },
+        };
+        var deleted = Guid.NewGuid();
+
+        var ex = new MachineOverLimitException(validation, deleted);
+
+        Assert.IsAssignableFrom<TamgaLimitExceededException>(ex);
+        Assert.Same(validation, ex.Validation);
+        Assert.Equal(deleted, ex.DeletedMachineId);
+        Assert.Equal(ValidationCode.TooMuchDisk, ex.EquivalentValidationCode);
+        Assert.Equal("TOO_MUCH_DISK", ex.Error.Code);
+        Assert.Equal((ushort)422, ex.Error.Status);
+        Assert.Null(ex.ErrorBodyParseFailure);
+
+        // Not in the mapper: a validate-time code is not an error-envelope code.
+        Assert.IsType<TamgaApiException>(TamgaErrorMapper.ToException(new TamgaApiError { Status = 422, Code = "TOO_MUCH_DISK", Detail = "d" }));
+        Assert.Throws<ArgumentNullException>(() => new MachineOverLimitException(null!, deleted));
+    }
 }

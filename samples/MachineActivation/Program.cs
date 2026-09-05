@@ -34,13 +34,16 @@ try
 {
     // An over-limit activation can fail in two different places, and both are live:
     //
-    //  1. The CREATE is refused outright with a 422 — caught below as TamgaLimitExceededException.
-    //     Nothing was created, so there is nothing to roll back.
+    //  1. The CREATE is refused outright with a 422 (e.g. MACHINE_LIMIT_EXCEEDED). Nothing was
+    //     created, so there is nothing to roll back.
     //  2. The create SUCCEEDS and validation reports the overage. The server's create-time check
     //     honours the policy's overage strategy, so under ALLOW_ACCESS / ALLOW_1_25X_OVERAGE the
-    //     machine row is written and only validate objects. That is what deleteOnOverLimit (true
-    //     by default) cleans up: create → validate → delete on
-    //     TooManyMachines/TooManyCores/TooMuchMemory/TooMuchDisk/TooManyProcesses.
+    //     machine row is written and only validate objects. deleteOnOverLimit (true by default)
+    //     then deletes the row and ActivateMachineAsync THROWS MachineOverLimitException — it no
+    //     longer returns a machine that has just been deleted.
+    //
+    // Both are TamgaLimitExceededException, caught together below. A tuple that comes back means
+    // the machine exists; a non-over-limit invalid code (EXPIRED, SUSPENDED, …) is returned, not thrown.
     //
     // Note Memory/Disk on CreateMachineRequest are MEGABYTES, not bytes — passing bytes inflates
     // the license's running total by 1,048,576x and locks out the next activation.
@@ -54,6 +57,7 @@ try
 
     if (!validation.Valid)
     {
+        // Not an over-limit code (those throw above) — the machine is real, the license is not usable.
         Console.WriteLine($"Activation rejected: {validation.Code} — {validation.Detail}");
         return 1;
     }
@@ -106,6 +110,13 @@ catch (FingerprintTakenException)
     // "Already activated, carry on" — NOT a reason to tell the user to buy more seats. The server
     // checks uniqueness before quota precisely so a re-activation is reported this way.
     Console.Error.WriteLine("This fingerprint is already registered within the policy's uniqueness scope.");
+    return 1;
+}
+catch (MachineOverLimitException ex)
+{
+    // Path 2: created, validated over-limit, deleted again. The machine in ex.DeletedMachineId is
+    // gone — nothing here may heartbeat it.
+    Console.Error.WriteLine($"Activation rolled back ({ex.EquivalentValidationCode}): {ex.Validation.Detail} — machine {ex.DeletedMachineId} was deleted again.");
     return 1;
 }
 catch (TamgaLimitExceededException ex)

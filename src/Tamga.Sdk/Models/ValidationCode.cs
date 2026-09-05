@@ -137,34 +137,40 @@ public sealed class ValidationCodeConverter : JsonConverter<ValidationCode>
 
     /// <summary>Serializes the <see cref="ValidationCode"/> as its wire string.</summary>
     public override void Write(Utf8JsonWriter writer, ValidationCode value, JsonSerializerOptions options)
+        => writer.WriteStringValue(ToWireString(value));
+
+    /// <summary>
+    /// The wire string for a <see cref="ValidationCode"/> — the one place the enum-to-string
+    /// direction is spelled out, shared by <see cref="Write"/> and by the client-side
+    /// <see cref="MachineOverLimitException"/>, which needs the value the server actually sent
+    /// in <c>meta.code</c> without a serializer round-trip.
+    /// </summary>
+    internal static string ToWireString(ValidationCode value) => value switch
     {
-        writer.WriteStringValue(value switch
-        {
-            ValidationCode.Valid => "VALID",
-            ValidationCode.Suspended => "SUSPENDED",
-            ValidationCode.Expired => "EXPIRED",
-            ValidationCode.Overdue => "OVERDUE",
-            ValidationCode.ProductScopeMismatch => "PRODUCT_SCOPE_MISMATCH",
-            ValidationCode.PolicyScopeMismatch => "POLICY_SCOPE_MISMATCH",
-            ValidationCode.UserScopeMismatch => "USER_SCOPE_MISMATCH",
-            ValidationCode.EnvironmentScopeMismatch => "ENVIRONMENT_SCOPE_MISMATCH",
-            ValidationCode.TooManyMachines => "TOO_MANY_MACHINES",
-            ValidationCode.TooManyCores => "TOO_MANY_CORES",
-            ValidationCode.TooMuchMemory => "TOO_MUCH_MEMORY",
-            ValidationCode.TooMuchDisk => "TOO_MUCH_DISK",
-            ValidationCode.TooManyProcesses => "TOO_MANY_PROCESSES",
-            ValidationCode.TooManyUses => "TOO_MANY_USES",
-            ValidationCode.NotFound => "NOT_FOUND",
-            ValidationCode.Banned => "BANNED",
-            ValidationCode.EntitlementsMissing => "ENTITLEMENTS_MISSING",
-            ValidationCode.TooManyUsers => "TOO_MANY_USERS",
-            ValidationCode.HeartbeatDead => "HEARTBEAT_DEAD",
-            ValidationCode.HeartbeatNotStarted => "HEARTBEAT_NOT_STARTED",
-            ValidationCode.FingerprintScopeMismatch => "FINGERPRINT_SCOPE_MISMATCH",
-            ValidationCode.ComponentsScopeMismatch => "COMPONENTS_SCOPE_MISMATCH",
-            ValidationCode.ChecksumScopeMismatch => "CHECKSUM_SCOPE_MISMATCH",
-            ValidationCode.VersionScopeMismatch => "VERSION_SCOPE_MISMATCH",
-            _ => "UNKNOWN",
-        });
-    }
+        ValidationCode.Valid => "VALID",
+        ValidationCode.Suspended => "SUSPENDED",
+        ValidationCode.Expired => "EXPIRED",
+        ValidationCode.Overdue => "OVERDUE",
+        ValidationCode.ProductScopeMismatch => "PRODUCT_SCOPE_MISMATCH",
+        ValidationCode.PolicyScopeMismatch => "POLICY_SCOPE_MISMATCH",
+        ValidationCode.UserScopeMismatch => "USER_SCOPE_MISMATCH",
+        ValidationCode.EnvironmentScopeMismatch => "ENVIRONMENT_SCOPE_MISMATCH",
+        ValidationCode.TooManyMachines => "TOO_MANY_MACHINES",
+        ValidationCode.TooManyCores => "TOO_MANY_CORES",
+        ValidationCode.TooMuchMemory => "TOO_MUCH_MEMORY",
+        ValidationCode.TooMuchDisk => "TOO_MUCH_DISK",
+        ValidationCode.TooManyProcesses => "TOO_MANY_PROCESSES",
+        ValidationCode.TooManyUses => "TOO_MANY_USES",
+        ValidationCode.NotFound => "NOT_FOUND",
+        ValidationCode.Banned => "BANNED",
+        ValidationCode.EntitlementsMissing => "ENTITLEMENTS_MISSING",
+        ValidationCode.TooManyUsers => "TOO_MANY_USERS",
+        ValidationCode.HeartbeatDead => "HEARTBEAT_DEAD",
+        ValidationCode.HeartbeatNotStarted => "HEARTBEAT_NOT_STARTED",
+        ValidationCode.FingerprintScopeMismatch => "FINGERPRINT_SCOPE_MISMATCH",
+        ValidationCode.ComponentsScopeMismatch => "COMPONENTS_SCOPE_MISMATCH",
+        ValidationCode.ChecksumScopeMismatch => "CHECKSUM_SCOPE_MISMATCH",
+        ValidationCode.VersionScopeMismatch => "VERSION_SCOPE_MISMATCH",
+        _ => "UNKNOWN",
+    };
 }

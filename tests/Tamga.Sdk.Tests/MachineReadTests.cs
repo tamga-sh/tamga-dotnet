@@ -348,6 +348,18 @@ public class MachineReadTests
     {"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"This fingerprint is already activated"}]}
     """;
 
+    /// <summary>
+    /// Exact wire shape from the API plan: string <c>status</c>, and <c>meta.machineId</c> present
+    /// ONLY when the machine holding the fingerprint is on the license named in the request.
+    /// </summary>
+    private static string FingerprintTakenWithMetaBody(Guid existingMachineId) => $$$"""
+    {"errors":[{"id":"1","status":"409","code":"FINGERPRINT_TAKEN","title":"Conflict","detail":"This fingerprint is already activated","meta":{"machineId":"{{{existingMachineId}}}"}}]}
+    """;
+
+    private const string MachineNotFoundBody = """
+    {"errors":[{"id":"2","status":"404","code":"NOT_FOUND","title":"Not Found","detail":"machine not found"}]}
+    """;
+
     private static string ValidationBody(Guid licenseId, string code) => new JsonObject
     {
         ["data"] = new JsonObject
@@ -429,6 +441,7 @@ public class MachineReadTests
         Assert.False(result.AlreadyActivated);
         Assert.Equal(created, result.Machine.Id);
         Assert.Equal(2, handler.Requests.Count);
+        Assert.False(result.RolledBack);
     }
 
     /// <summary>
@@ -455,6 +468,7 @@ public class MachineReadTests
         Assert.True(result.AlreadyActivated);
         Assert.Equal(ValidationCode.TooManyMachines, result.Validation.Code);
         Assert.DoesNotContain(handler.Requests, r => r.Request.Method == HttpMethod.Delete);
+        Assert.False(result.RolledBack);
     }
 
     [Fact]
@@ -474,6 +488,12 @@ public class MachineReadTests
         Assert.False(result.AlreadyActivated);
         var delete = Assert.Single(handler.Requests, r => r.Request.Method == HttpMethod.Delete);
         Assert.Equal($"/v1/accounts/acct-1/machines/{created}", delete.Request.RequestUri!.AbsolutePath);
+
+        // No throw here, unlike the tuple overload: the result type has room to say what happened.
+        // The machine is returned as a documented tombstone — its row is gone.
+        Assert.True(result.RolledBack);
+        Assert.Equal(created, result.Machine.Id);
+        Assert.Equal(ValidationCode.TooManyMachines, result.Validation.Code);
     }
 
     /// <summary>
@@ -514,6 +534,86 @@ public class MachineReadTests
                 new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = Guid.NewGuid() }));
 
         Assert.Single(handler.Requests);
+    }
+
+    /// <summary>
+    /// The fast path. A same-license conflict now names the existing machine in
+    /// <c>meta.machineId</c>, so the adopt step is one GET by id — no substring search, no page
+    /// walk — and the server's own "it is on your license" is what makes the adoption safe.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineIdempotentAsync_AdoptsByIdFromMeta_WithoutSearching()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+        var existing = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.Conflict, FingerprintTakenWithMetaBody(existing));   // POST /machines
+        handler.Enqueue(HttpStatusCode.OK, SingleMachineBody(existing, "fp-1"));            // GET  /machines/{id}
+        handler.Enqueue(HttpStatusCode.OK, ValidationBody(licenseId, "VALID"));             // POST validate
+
+        var result = await client.ActivateMachineIdempotentAsync(
+            new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId });
+
+        Assert.True(result.AlreadyActivated);
+        Assert.False(result.RolledBack);
+        Assert.Equal(existing, result.Machine.Id);
+        Assert.Equal(3, handler.Requests.Count);
+
+        var read = handler.Requests[1].Request;
+        Assert.Equal(HttpMethod.Get, read.Method);
+        Assert.Equal($"/v1/accounts/acct-1/machines/{existing}", read.RequestUri!.AbsolutePath);
+        Assert.DoesNotContain(handler.Requests, r => r.Request.RequestUri!.Query.Contains("filter%5Bq%5D", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// The named machine can vanish between the conflict and the read. A 404 there is not a
+    /// reason to fail: the scoped search is the honest answer, and if it finds nothing the
+    /// server's own conflict surfaces.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineIdempotentAsync_FallsBackToTheScopedSearch_WhenTheNamedMachineIsGone()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+        var named = Guid.NewGuid();
+        var found = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.Conflict, FingerprintTakenWithMetaBody(named));
+        handler.Enqueue(HttpStatusCode.NotFound, MachineNotFoundBody);
+        handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 1, 1, (found, "fp-1")));
+        handler.Enqueue(HttpStatusCode.OK, ValidationBody(licenseId, "VALID"));
+
+        var result = await client.ActivateMachineIdempotentAsync(
+            new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = licenseId });
+
+        Assert.True(result.AlreadyActivated);
+        Assert.Equal(found, result.Machine.Id);
+        Assert.Equal(4, handler.Requests.Count);
+        Assert.Contains($"filter%5Blicense%5D={licenseId}", handler.Requests[2].Request.RequestUri!.Query);
+    }
+
+    /// <summary>
+    /// The adopted row is re-checked for the exact fingerprint, ordinal, the same way the search
+    /// result is. A machine the server named that reports a different fingerprint is not adopted.
+    /// </summary>
+    [Fact]
+    public async Task ActivateMachineIdempotentAsync_DoesNotAdoptANamedMachine_WhoseFingerprintDiffers()
+    {
+        var (client, handler) = MakeClient();
+        var named = Guid.NewGuid();
+
+        handler.Enqueue(HttpStatusCode.Conflict, FingerprintTakenWithMetaBody(named));
+        handler.Enqueue(HttpStatusCode.OK, SingleMachineBody(named, "FP-1"));      // case differs — not a match
+        handler.Enqueue(HttpStatusCode.OK, MachineListBody(1, 100, 0, 0));
+
+        var ex = await Assert.ThrowsAsync<FingerprintTakenException>(() =>
+            client.ActivateMachineIdempotentAsync(
+                new CreateMachineRequest { Fingerprint = "fp-1", LicenseId = Guid.NewGuid() }));
+
+        Assert.Equal(named, ex.ExistingMachineId);
+        Assert.Equal(3, handler.Requests.Count);
+        Assert.DoesNotContain(handler.Requests, r => r.Request.Method == HttpMethod.Delete);
     }
 
     [Fact]
