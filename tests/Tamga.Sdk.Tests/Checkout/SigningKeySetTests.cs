@@ -170,8 +170,41 @@ public class SigningKeySetTests
         Assert.Throws<ArgumentNullException>(() => SigningKeySet.FromPublicKeys((IEnumerable<string>)null!));
     }
 
-    // The distinguishable conditions (unknown kid vs. unpublished account vs. forged file) are
-    // exercised end-to-end through the public verification entry points in
-    // SigningKeyRotationTests — that is the real call path, and SigningKeySet.Resolve stays
-    // internal rather than being widened just to be asserted directly.
+    // The distinguishable conditions (unknown kid vs. unpublished account vs. forged file vs.
+    // wrong license key) are exercised end-to-end through the public verification entry points in
+    // SigningKeyRotationTests — that is the real call path. The two internal helpers behind them
+    // are pinned here only for the parts a public test cannot reach.
+
+    [Fact]
+    public void FindVerifyingKey_TriesOnlyUsableKeys_InOrder_AndStopsAtTheFirstMatch()
+    {
+        var set = SigningKeySet.FromResources(new[]
+        {
+            Resource("0000000000000000", "ml-dsa-44", ZeroKeyB64),      // unusable: not Ed25519
+            Resource("1111111111111111", "ed25519", "!!!not base64!!!"), // unusable: undecodable
+            Resource(ZeroKeyKid, "ed25519", ZeroKeyB64),
+            Resource(SequentialKeyKid, "ed25519", SequentialKeyB64),
+        });
+        var tried = new List<byte[]>();
+
+        var found = set.FindVerifyingKey(publicKey => { tried.Add(publicKey); return publicKey[0] == 0x00 && publicKey[1] == 0x01; });
+
+        Assert.Equal(SequentialKeyKid, found!.KeyId);
+        Assert.Equal(2, tried.Count);
+        Assert.Null(set.FindVerifyingKey(_ => false));
+        Assert.Null(SigningKeySet.Empty.FindVerifyingKey(_ => true));
+    }
+
+    [Fact]
+    public void UnverifiableFileFailure_LabelsByTheClaimedKid()
+    {
+        var set = SigningKeySet.FromPublicKeys(ZeroKeyB64);
+
+        Assert.IsType<SignatureVerificationException>(set.UnverifiableFileFailure(null, "License file"));
+        Assert.IsType<SignatureVerificationException>(set.UnverifiableFileFailure("", "License file"));
+        Assert.IsType<SignatureVerificationException>(set.UnverifiableFileFailure(ZeroKeyKid, "License file"));       // held → forged
+        Assert.IsType<UnknownSigningKeyException>(set.UnverifiableFileFailure(SequentialKeyKid, "License file"));     // not held
+        Assert.IsType<UnpublishedSigningKeyException>(set.UnverifiableFileFailure(Ed25519.UnpublishedAccountKeyId, "License file"));
+        Assert.Contains("Machine file", set.UnverifiableFileFailure(null, "Machine file").Message, StringComparison.Ordinal);
+    }
 }

@@ -261,7 +261,10 @@ public class LicenseFileTests
         var pem = BuildValidPem(privateKey, enc, "aes-256-gcm+ed25519+v2");
 
         var licenseFile = LicenseFile.Parse(pem);
-        Assert.Throws<SignatureVerificationException>(() => licenseFile.VerifyAndDecrypt(publicKey, "wrong-key"));
+        // A verified signature followed by an AES-GCM failure is the wrong license key, not a
+        // forgery (D16). Still a SignatureVerificationException for a 2.1.1 catch clause.
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => licenseFile.VerifyAndDecrypt(publicKey, "wrong-key"));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     // ── Format v2: expiry inside the signature ───────────────────────────────

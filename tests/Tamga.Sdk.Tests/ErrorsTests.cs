@@ -307,4 +307,22 @@ public class ErrorsTests
         Assert.IsType<TamgaApiException>(TamgaErrorMapper.ToException(new TamgaApiError { Status = 422, Code = "TOO_MUCH_DISK", Detail = "d" }));
         Assert.Throws<ArgumentNullException>(() => new MachineOverLimitException(null!, deleted));
     }
+
+    /// <summary>
+    /// LicenseKeyMismatchException is a SignatureVerificationException on purpose: every
+    /// <c>catch (SignatureVerificationException)</c> written against 2.1.1 keeps refusing a file
+    /// whose payload will not open, and a caller who wants "wrong license key" apart from "forged"
+    /// catches the subclass first. Unsealing the base is not a breaking change.
+    /// </summary>
+    [Fact]
+    public void LicenseKeyMismatchException_IsCatchableAsSignatureVerificationException()
+    {
+        Assert.False(typeof(SignatureVerificationException).IsSealed);
+        Assert.True(typeof(SignatureVerificationException).IsAssignableFrom(typeof(LicenseKeyMismatchException)));
+        Assert.True(typeof(LicenseKeyMismatchException).IsSealed);
+
+        var inner = new InvalidOperationException("tag");
+        var ex = new LicenseKeyMismatchException("wrong key", inner);
+        Assert.Same(inner, ex.InnerException);
+    }
 }

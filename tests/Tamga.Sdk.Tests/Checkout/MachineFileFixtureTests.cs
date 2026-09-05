@@ -339,8 +339,9 @@ public class MachineFileFixtureTests
         var scheme = ParseScheme(fixture.Scheme);
         var publicKey = Convert.FromBase64String(fixture.PublicKeyB64);
 
-        Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyAndDecrypt(
             scheme, publicKey, fixture.LicenseKey ?? string.Empty, fixture.Fingerprint + "-wrong", ClockBeforeAnyExpiry));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     [Theory]
@@ -352,8 +353,9 @@ public class MachineFileFixtureTests
         var scheme = ParseScheme(fixture.Scheme);
         var publicKey = Convert.FromBase64String(fixture.PublicKeyB64);
 
-        Assert.Throws<SignatureVerificationException>(() => file.VerifyAndDecrypt(
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() => file.VerifyAndDecrypt(
             scheme, publicKey, (fixture.LicenseKey ?? string.Empty) + "-wrong", fixture.Fingerprint, ClockBeforeAnyExpiry));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     [Theory]

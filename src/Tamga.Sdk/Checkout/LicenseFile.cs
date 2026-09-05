@@ -191,7 +191,7 @@ public sealed class LicenseFile
     /// (unencrypted) file, but still required by this method's signature for a uniform call shape
     /// across both cases.
     /// </param>
-    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted — or decryption failed its authentication tag.</exception>
+    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted. As its subclass <see cref="LicenseKeyMismatchException"/>: the signature verified and the encrypted payload did not open under the supplied key material.</exception>
     /// <exception cref="UnsupportedAlgorithmException">Cannot occur on a parsed instance — <see cref="Parse"/> refuses any <c>alg</c> that is not format-v2 Ed25519; listed so a caller catching it around Parse sees the same type here.</exception>
     /// <exception cref="LicenseFileExpiredException">The signature verified but the signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The decrypted/decoded payload is not valid JSON in the expected shape, or carries no signed <c>meta</c> claims.</exception>
@@ -219,7 +219,7 @@ public sealed class LicenseFile
     /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
     /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
     /// <returns>The license carried by the file, together with the claims that were inside the signed bytes.</returns>
-    /// <exception cref="SignatureVerificationException">Signature verification or payload decryption failed.</exception>
+    /// <exception cref="SignatureVerificationException">Signature verification failed — the file may be forged or corrupted. As its subclass <see cref="LicenseKeyMismatchException"/>: the signature verified and the encrypted payload did not open under the supplied key material.</exception>
     /// <exception cref="UnsupportedAlgorithmException">Cannot occur on a parsed instance — <see cref="Parse"/> refuses any <c>alg</c> that is not format-v2 Ed25519; listed so a caller catching it around Parse sees the same type here.</exception>
     /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
     /// <exception cref="OfflineFileFormatException">The payload is malformed or carries no signed <c>meta</c> claims.</exception>
@@ -238,48 +238,54 @@ public sealed class LicenseFile
     }
 
     /// <summary>
-    /// Verifies a <c>.lic</c> file against a <see cref="SigningKeySet"/>, selecting the key by the
-    /// file's own signed <c>kid</c> claim so a file that predates a key rotation still verifies.
+    /// Verifies a <c>.lic</c> file against a <see cref="SigningKeySet"/>, trying every trusted key
+    /// against the signature so a file that predates a key rotation still verifies, and returns
+    /// the license, its signed claims and the key that verified it.
     /// </summary>
     /// <remarks>
     /// <para>
-    /// <b>Use this instead of the single-key overload whenever the account may ever rotate.</b>
-    /// Three outcomes, and keeping them apart is the whole point:
+    /// The outcomes, and what each asks of the caller:
     /// </para>
     /// <list type="bullet">
     /// <item><description>
-    /// the <c>kid</c> is in the set and the signature checks out → the file is good;
+    /// a held key verifies the signature → the license, its claims and that key are returned;
     /// </description></item>
     /// <item><description>
-    /// the <c>kid</c> is not in the set → <see cref="UnknownSigningKeyException"/> (or
+    /// no key verifies and the <c>kid</c> is NOT in the set → <see cref="UnknownSigningKeyException"/> (or
     /// <see cref="UnpublishedSigningKeyException"/>). <b>Not a forgery</b> — refresh the key set or
     /// ship an update, then retry;
     /// </description></item>
     /// <item><description>
-    /// the <c>kid</c> IS in the set and the signature still fails →
-    /// <see cref="SignatureVerificationException"/>. Refuse the file.
+    /// no key verifies and the <c>kid</c> IS in the set, or cannot be read →
+    /// <see cref="SignatureVerificationException"/>. Refuse the file;
+    /// </description></item>
+    /// <item><description>
+    /// a key verifies but the encrypted payload will not open →
+    /// <see cref="LicenseKeyMismatchException"/>. The file is authentic; the license key is wrong.
     /// </description></item>
     /// </list>
     /// <para>
-    /// <b>One ordering difference from the single-key overload is worth knowing.</b> Selecting a
-    /// key needs the <c>kid</c>, and the <c>kid</c> lives inside <c>enc</c>, so <c>enc</c> is
-    /// decoded — and, when encrypted, decrypted under the license key, which is itself
-    /// authenticated by AES-GCM — <em>before</em> the signature is checked. A file that is
-    /// malformed or undecryptable therefore reports that rather than a signature failure. Nothing
-    /// from those bytes is trusted: the only value taken from them before verification is the
-    /// <c>kid</c>, and it can only ever select from keys the caller already supplied, never
-    /// introduce one. No <see cref="License"/> is ever produced from an unverified payload.
+    /// <b>Order of work.</b> The signature is checked first — against every usable key in
+    /// <paramref name="signingKeys"/>, over <c>enc</c>'s base64 string — and nothing in <c>enc</c>
+    /// is decoded until one key has verified it, exactly like the single-key overload. Only when no
+    /// key verifies is <c>enc</c> decoded (and, when encrypted, decrypted under the license key)
+    /// purely to read the <c>kid</c> and label the failure; nothing else is taken from those bytes
+    /// and no <see cref="License"/> is ever produced from them. Before 2.1.2 this path decoded
+    /// first to select the one key the <c>kid</c> named (audit D16); the <c>kid</c> now only
+    /// decides the failure label, so "stale set" and "forgery" stay distinct without gating
+    /// which key may verify.
     /// </para>
     /// </remarks>
     /// <param name="signingKeys">The trusted key set — from <c>TamgaClient.GetSigningKeySetAsync</c> or <see cref="SigningKeySet.FromPublicKeys(string[])"/>.</param>
     /// <param name="licenseKey">The license key, used to derive the AES-256-GCM key for an encrypted file.</param>
     /// <param name="nowUnixSeconds">The current time, seconds since the Unix epoch, used for the <c>exp</c> check.</param>
-    /// <returns>The license, the signed claims, and the key the file was verified against.</returns>
-    /// <exception cref="UnknownSigningKeyException">The file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
-    /// <exception cref="UnpublishedSigningKeyException">The signing account has no Ed25519 public key recorded server-side.</exception>
-    /// <exception cref="SignatureVerificationException">The named key IS trusted and the signature still failed — the file is forged or corrupted.</exception>
+    /// <returns>The license, the signed claims, and the key that verified the signature.</returns>
+    /// <exception cref="UnknownSigningKeyException">No key verified and the file's <c>kid</c> names no key in <paramref name="signingKeys"/> — refresh the set; this is not a signature failure.</exception>
+    /// <exception cref="UnpublishedSigningKeyException">No key verified and the file's <c>kid</c> is <see cref="Crypto.Ed25519.UnpublishedAccountKeyId"/>.</exception>
+    /// <exception cref="SignatureVerificationException">No key verified and the <c>kid</c> names a held key or is unreadable — the file is forged or corrupted.</exception>
+    /// <exception cref="LicenseKeyMismatchException">A key verified; the AES-256-GCM payload did not open under <paramref name="licenseKey"/>.</exception>
     /// <exception cref="LicenseFileExpiredException">The signed <c>exp</c> claim has passed, allowing 60 seconds of clock skew.</exception>
-    /// <exception cref="OfflineFileFormatException">The payload is malformed or carries no signed <c>meta</c> claims.</exception>
+    /// <exception cref="OfflineFileFormatException">The (verified) payload is malformed or carries no signed <c>meta</c> claims.</exception>
     public (License License, LicenseFileClaims Claims, SigningKey Key) VerifyWithKeySet(
         SigningKeySet signingKeys,
         string licenseKey,
@@ -287,27 +293,50 @@ public sealed class LicenseFile
     {
         ArgumentNullException.ThrowIfNull(signingKeys);
 
-        // Decode first — the kid we need to pick a key is inside the payload. See the remarks
-        // above for why reading it before verification is sound.
-        var payload = ParsePayload(DecodePayloadJson(licenseKey));
-        var claims = payload.Meta
-            ?? throw new OfflineFileFormatException(
-                "License file payload is missing the signed 'meta' claims (this looks like a pre-v2 file).");
-
-        var (key, publicKeyBytes) = signingKeys.Resolve(claims.KeyId);
-
-        // Verified against exactly the key the kid named, and nothing else. There is deliberately
-        // no fallback that tries the other keys: it would verify the same files while destroying
-        // the distinction between "stale key set" and "forged file".
-        if (!Verify(publicKeyBytes))
+        // Signature first, against every usable key, over `enc`'s base64 STRING bytes — before a
+        // single byte of `enc` is decoded. Nothing attacker-controlled is parsed until one held
+        // key has vouched for it. (alg was gated by Parse.)
+        SigningKey? verifiedKey = null;
+        if (TryDecodeSignature(out var signature))
         {
-            throw new SignatureVerificationException(
-                $"License file signature verification failed against the key its 'kid' claim names ('{claims.KeyId}'), " +
-                "which IS in the supplied key set — the file is forged or corrupted.");
+            var message = Encoding.UTF8.GetBytes(Certificate.Enc);
+            verifiedKey = signingKeys.FindVerifyingKey(publicKey => Ed25519.Verify(publicKey, message, signature));
         }
 
+        if (verifiedKey is null)
+        {
+            // No held key vouches for this file. The only remaining question is how to label
+            // that, and the kid decides — read from bytes nobody has verified, used for nothing
+            // but choosing between failure messages.
+            throw signingKeys.UnverifiableFileFailure(TryReadUnverifiedKeyId(licenseKey), "License file");
+        }
+
+        // Only now is `enc` known to be authentic. From here an AES-GCM failure cannot be a
+        // forgery — the signature just proved the ciphertext is the server's — so DecryptPayload
+        // reports it as LicenseKeyMismatchException.
+        var payload = ParsePayload(DecodePayloadJson(licenseKey));
         var (license, verifiedClaims) = FinishPayload(payload, nowUnixSeconds);
-        return (license, verifiedClaims, key);
+        return (license, verifiedClaims, verifiedKey);
+    }
+
+    /// <summary>
+    /// Reads the <c>kid</c> from a payload NO held key has vouched for, or <see langword="null"/>
+    /// when it cannot be read. Used only to label a failure — never to select a key.
+    /// </summary>
+    private string? TryReadUnverifiedKeyId(string licenseKey)
+    {
+        try
+        {
+            var keyId = ParsePayload(DecodePayloadJson(licenseKey)).Meta!.KeyId;
+            return string.IsNullOrEmpty(keyId) ? null : keyId;
+        }
+        catch (Exception ex) when (ex is OfflineFileFormatException or UnsupportedAlgorithmException or SignatureVerificationException)
+        {
+            // Undecodable, pre-v2, or undecryptable (a wrong license key surfaces from
+            // DecryptPayload as LicenseKeyMismatchException, which is a
+            // SignatureVerificationException): there is no kid to label with.
+            return null;
+        }
     }
 
     /// <summary>
@@ -478,11 +507,17 @@ public sealed class LicenseFile
         }
         catch (AuthenticationTagMismatchException ex)
         {
-            throw new SignatureVerificationException($"License file decryption failed authentication (wrong license key, or tampered payload): {ex.Message}");
+            // Every caller has verified the signature before reaching here (the one that has not,
+            // TryReadUnverifiedKeyId, swallows this). So the ciphertext is the server's and the
+            // only thing that can be wrong is the key derived from the caller's license key.
+            throw new LicenseKeyMismatchException(
+                "License file decryption failed authentication: the signature verified, so the payload is the server's, " +
+                "and the AES-256-GCM key derived from the supplied license key does not open it — the license key is wrong for this file.",
+                ex);
         }
         catch (CryptographicException ex)
         {
-            throw new SignatureVerificationException($"License file decryption failed: {ex.Message}");
+            throw new LicenseKeyMismatchException($"License file decryption failed after a verified signature: {ex.Message}", ex);
         }
     }
 }

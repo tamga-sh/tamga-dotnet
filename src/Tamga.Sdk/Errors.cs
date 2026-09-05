@@ -342,11 +342,55 @@ public sealed class OfflineFileFormatException : Exception
     public OfflineFileFormatException(string message) : base(message) { }
 }
 
-/// <summary>Thrown when Ed25519/RSA/ECDSA signature verification fails on a <c>.lic</c>/<c>.machine</c> file or offline proof — always fails closed, never silently accepts.</summary>
-public sealed class SignatureVerificationException : Exception
+/// <summary>
+/// Thrown when Ed25519/RSA/ECDSA signature verification fails on a <c>.lic</c>/<c>.machine</c>
+/// file or offline proof — always fails closed, never silently accepts.
+/// </summary>
+/// <remarks>
+/// Not sealed since 2.1.2: <see cref="LicenseKeyMismatchException"/> derives from it, so a
+/// <c>catch (SignatureVerificationException)</c> written against 2.1.1 keeps refusing a file whose
+/// payload would not open, while a caller that wants to tell "forged" from "wrong license key"
+/// catches the subclass first. The base type on its own still means exactly what it did: the
+/// signature over <c>enc</c> did not verify against the key (single-key paths) or against any key
+/// in the set (key-set paths).
+/// </remarks>
+public class SignatureVerificationException : Exception
 {
     /// <summary>Constructs with the given error message.</summary>
     public SignatureVerificationException(string message) : base(message) { }
+
+    /// <summary>Constructs with the given error message and the underlying failure.</summary>
+    public SignatureVerificationException(string message, Exception? innerException) : base(message, innerException) { }
+}
+
+/// <summary>
+/// Thrown when an offline file's signature verified and its AES-256-GCM payload still failed to
+/// authenticate. The ciphertext is the server's — the signature just proved it — so the only
+/// thing that can be wrong is the key material the caller supplied: the license key for a
+/// <c>.lic</c> file; the license key or the fingerprint for a <c>.machine</c> file.
+/// </summary>
+/// <remarks>
+/// <para>
+/// The distinction is the point (audit D16). Before 2.1.2 this surfaced as a bare
+/// <see cref="SignatureVerificationException"/>, so "you typed the wrong license key" and "someone
+/// tampered with this file" produced the same error and sent support to the wrong place.
+/// </para>
+/// <para>
+/// It can only arise <em>after</em> a signature has verified: on the single-key paths, which have
+/// always verified first, and on the key-set paths, which do so since 2.1.2. It is therefore never
+/// a <see cref="SigningKeySelectionException"/> — the key was found and it worked. Raised by both
+/// <see cref="Checkout.LicenseFile"/> and <see cref="Checkout.MachineFile"/>; the name keeps the
+/// <c>LicenseKey</c> prefix because the license key is the input both formats share, and a machine
+/// file's message says when the fingerprint is the other candidate.
+/// </para>
+/// </remarks>
+public sealed class LicenseKeyMismatchException : SignatureVerificationException
+{
+    /// <summary>Constructs with the given error message.</summary>
+    public LicenseKeyMismatchException(string message) : base(message) { }
+
+    /// <summary>Constructs with the given error message and the AES-GCM failure that caused it.</summary>
+    public LicenseKeyMismatchException(string message, Exception? innerException) : base(message, innerException) { }
 }
 
 /// <summary>
@@ -366,9 +410,12 @@ public sealed class SignatureVerificationException : Exception
 /// then try again. Locking the customer out here is the bug this exists to prevent.
 /// </description></item>
 /// <item><description>
-/// A <see cref="SignatureVerificationException"/> from a key-set entry point means the file's
-/// <c>kid</c> named a key the caller <em>does</em> trust and the signature still failed. That file
-/// is forged or corrupted. Refuse it.
+/// A <see cref="SignatureVerificationException"/> from a key-set entry point means no key in the
+/// set verified the signature <em>and</em> the file's <c>kid</c> names a key the caller does hold
+/// (or could not be read at all). That file is forged or corrupted. Refuse it. Its subclass
+/// <see cref="LicenseKeyMismatchException"/> is the one exception to "refuse": the signature
+/// verified against a held key and only the AES-GCM payload failed to open — wrong license key
+/// or fingerprint, not a forgery.
 /// </description></item>
 /// </list>
 /// <para>

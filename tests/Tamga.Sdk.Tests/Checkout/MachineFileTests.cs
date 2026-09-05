@@ -370,8 +370,11 @@ public class MachineFileTests
         var pem = BuildPem(enc, signature, "aes-256-gcm+ed25519+v2");
 
         var machineFile = MachineFile.Parse(pem);
-        Assert.Throws<SignatureVerificationException>(() =>
+        // Wrong HKDF `info` derives a different key and fails AES-GCM authentication after a
+        // verified signature — that is the wrong-key-material verdict, never silent garbage.
+        var ex = Assert.Throws<LicenseKeyMismatchException>(() =>
             machineFile.VerifyAndDecrypt(LicenseScheme.Ed25519Sign, publicKeyBytes, licenseKey, "fp-wrong", IssuedAt));
+        Assert.IsAssignableFrom<SignatureVerificationException>(ex);
     }
 
     [Fact]
