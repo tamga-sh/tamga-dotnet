@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.1.2](https://github.com/tamga-sh/tamga-dotnet/compare/v2.1.1...v2.1.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* bind a JSON:API error's status under any options and surface meta.machineId and the new 422 codes ([2f67dbc](https://github.com/tamga-sh/tamga-dotnet/commit/2f67dbcb497a8fc2d8eb188253f274664fffe69b))
+* close audit D15–D18 and adapt to the API error meta, new 422s and key-set changes (2.1.2) ([4ef6bc6](https://github.com/tamga-sh/tamga-dotnet/commit/4ef6bc615e38b9352be0baf1ca5aff65e426accc))
+* refuse a pre-v2 or non-Ed25519 offline file at Parse, with one exception type on every entry point ([ae5a2ff](https://github.com/tamga-sh/tamga-dotnet/commit/ae5a2ff93050d2694b65fc4340e5c90915cf634b))
+* throw MachineOverLimitException after an activation rollback and adopt a conflicting machine by the id the server names ([5d84e5f](https://github.com/tamga-sh/tamga-dotnet/commit/5d84e5f444a36d8fdf125c39af4814c19bb6d4ac))
+* verify an offline file's signature against the key set before decoding it, and report a wrong license key as its own failure ([4227a98](https://github.com/tamga-sh/tamga-dotnet/commit/4227a98c61be15a54d5c379c9a2b7d0438a5b0df))
+
 ## [2.1.1](https://github.com/tamga-sh/tamga-dotnet/compare/v2.1.0...v2.1.1) (2026-08-21)
 
 
