@@ -99,7 +99,7 @@ public sealed record Scope
     public string? Checksum { get; init; }
 }
 
-/// <summary>The JSON:API <c>attributes</c> bag for a license resource — all 21 attributes the server emits.</summary>
+/// <summary>The JSON:API <c>attributes</c> bag for a license resource — all 19 attributes the server emits.</summary>
 public sealed record LicenseAttributes
 {
     /// <summary>The license's display name, if one was set.</summary>
@@ -137,10 +137,6 @@ public sealed record LicenseAttributes
     [JsonPropertyName("protected")]
     public bool Protected { get; init; }
 
-    /// <summary>The number of times the license has been used.</summary>
-    [JsonPropertyName("uses")]
-    public int Uses { get; init; }
-
     /// <summary>The license's key/checkout signing scheme, if one is set on the license itself.</summary>
     [JsonPropertyName("scheme")]
     public string? Scheme { get; init; }
@@ -160,10 +156,6 @@ public sealed record LicenseAttributes
     /// <summary>The license's own machine cap, if set. Applied on top of the policy's cap, under the same overage strategy.</summary>
     [JsonPropertyName("max_machines")]
     public int? MaxMachines { get; init; }
-
-    /// <summary>The license's own use cap, if set.</summary>
-    [JsonPropertyName("max_uses")]
-    public int? MaxUses { get; init; }
 
     /// <summary>The license's own user cap, if set.</summary>
     [JsonPropertyName("max_users")]
@@ -226,9 +218,6 @@ public sealed record License
     /// <summary>The license's expiration timestamp, if any.</summary>
     public DateTimeOffset? Expiry { get; init; }
 
-    /// <summary>The number of times the license has been used.</summary>
-    public int Uses { get; init; }
-
     /// <summary>The license's key/checkout signing scheme, if one is set on the license itself.</summary>
     public string? Scheme { get; init; }
 
@@ -243,9 +232,6 @@ public sealed record License
 
     /// <summary>The license's own machine cap, if set. Applied on top of the policy's cap, under the same overage strategy.</summary>
     public int? MaxMachines { get; init; }
-
-    /// <summary>The license's own use cap, if set.</summary>
-    public int? MaxUses { get; init; }
 
     /// <summary>The license's own user cap, if set.</summary>
     public int? MaxUsers { get; init; }
@@ -297,13 +283,11 @@ public sealed record License
             Suspended = attrs.Suspended,
             Protected = attrs.Protected,
             Expiry = attrs.Expiry,
-            Uses = attrs.Uses,
             Scheme = attrs.Scheme,
             Encrypted = attrs.Encrypted,
             Strict = attrs.Strict,
             Floating = attrs.Floating,
             MaxMachines = attrs.MaxMachines,
-            MaxUses = attrs.MaxUses,
             MaxUsers = attrs.MaxUsers,
             LastValidatedAt = attrs.LastValidatedAt,
             LastCheckInAt = attrs.LastCheckInAt,

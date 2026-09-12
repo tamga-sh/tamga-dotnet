@@ -476,10 +476,6 @@ public sealed record Policy
     [JsonPropertyName("max_processes")]
     public int? MaxProcesses { get; init; }
 
-    /// <summary>The maximum number of uses allowed under this policy.</summary>
-    [JsonPropertyName("max_uses")]
-    public int? MaxUses { get; init; }
-
     /// <summary>The maximum number of users allowed under this policy.</summary>
     /// <remarks>
     /// Enforced: all three validate endpoints answer <see cref="ValidationCode.TooManyUsers"/>

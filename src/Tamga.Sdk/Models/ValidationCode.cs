@@ -4,11 +4,13 @@ using System.Text.Json.Serialization;
 namespace Tamga.Sdk.Models;
 
 /// <summary>
-/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 24 wire values; 19 are
+/// Mirrors <c>meta.code</c> on the license validate endpoints. Models all 23 wire values; 18 are
 /// reachable today and 5 are not — <see cref="NotFound"/>, <see cref="Banned"/>,
 /// <see cref="ComponentsScopeMismatch"/>, <see cref="ChecksumScopeMismatch"/>,
 /// <see cref="VersionScopeMismatch"/> (see per-member remarks). An unrecognized/future wire value
 /// deserializes to <see cref="Unknown"/> rather than throwing (see <see cref="ValidationCodeConverter"/>).
+/// <c>TOO_MANY_USES</c> was retired entirely (not just unreachable) — the global per-license use
+/// counter it reported on no longer exists on the wire, replaced by named per-entitlement meters.
 /// </summary>
 [JsonConverter(typeof(ValidationCodeConverter))]
 public enum ValidationCode
@@ -54,9 +56,6 @@ public enum ValidationCode
 
     /// <summary>Wire value <c>TOO_MANY_PROCESSES</c>. ✅ reachable, per overage strategy.</summary>
     TooManyProcesses,
-
-    /// <summary>Wire value <c>TOO_MANY_USES</c>. ✅ reachable, strict <c>&gt;=</c>, no overage strategy applies.</summary>
-    TooManyUses,
 
     /// <summary>Wire value <c>NOT_FOUND</c>. ⛔ handler returns HTTP 404 directly instead; this <c>meta.code</c> value never actually appears.</summary>
     NotFound,
@@ -122,7 +121,6 @@ public sealed class ValidationCodeConverter : JsonConverter<ValidationCode>
             "TOO_MUCH_MEMORY" => ValidationCode.TooMuchMemory,
             "TOO_MUCH_DISK" => ValidationCode.TooMuchDisk,
             "TOO_MANY_PROCESSES" => ValidationCode.TooManyProcesses,
-            "TOO_MANY_USES" => ValidationCode.TooManyUses,
             "NOT_FOUND" => ValidationCode.NotFound,
             "BANNED" => ValidationCode.Banned,
             "ENTITLEMENTS_MISSING" => ValidationCode.EntitlementsMissing,
@@ -162,7 +160,6 @@ public sealed class ValidationCodeConverter : JsonConverter<ValidationCode>
         ValidationCode.TooMuchMemory => "TOO_MUCH_MEMORY",
         ValidationCode.TooMuchDisk => "TOO_MUCH_DISK",
         ValidationCode.TooManyProcesses => "TOO_MANY_PROCESSES",
-        ValidationCode.TooManyUses => "TOO_MANY_USES",
         ValidationCode.NotFound => "NOT_FOUND",
         ValidationCode.Banned => "BANNED",
         ValidationCode.EntitlementsMissing => "ENTITLEMENTS_MISSING",

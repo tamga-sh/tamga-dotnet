@@ -22,9 +22,9 @@ public class PolicyReadTests
     }
 
     /// <summary>
-    /// Every one of the 30 attributes the server's policy serializer emits, with the spellings and
+    /// Every one of the 29 attributes the server's policy serializer emits, with the spellings and
     /// casings it actually uses. This fixture is the regression test for the defect the licence
-    /// model shipped with and this one inherited: a model that quietly reads 16 of 30 fields and
+    /// model shipped with and this one inherited: a model that quietly reads 16 of 29 fields and
     /// reports the rest as absent.
     /// </summary>
     private static readonly JsonObject FullPolicyAttributes = new()
@@ -53,7 +53,6 @@ public class PolicyReadTests
         ["overage_strategy"] = "ALLOW_1_25X_OVERAGE",
         ["max_machines"] = 5,
         ["max_cores"] = 32,
-        ["max_uses"] = 100,
         ["max_processes"] = 4,
         ["max_users"] = 3,
         ["metadata"] = new JsonObject { ["tier"] = "pro" },
@@ -107,7 +106,6 @@ public class PolicyReadTests
         Assert.Equal(OverageStrategy.Allow125xOverage, policy.OverageStrategy);
         Assert.Equal(5, policy.MaxMachines);
         Assert.Equal(32, policy.MaxCores);
-        Assert.Equal(100, policy.MaxUses);
         Assert.Equal(4, policy.MaxProcesses);
         Assert.Equal(3, policy.MaxUsers);
         Assert.NotNull(policy.Metadata);
@@ -384,13 +382,11 @@ public class PolicyReadTests
                     ["expiry"] = "2027-01-02T03:04:05Z",
                     ["suspended"] = false,
                     ["protected"] = true,
-                    ["uses"] = 7,
                     ["scheme"] = "ED25519_SIGN",
                     ["encrypted"] = true,
                     ["strict"] = true,
                     ["floating"] = false,
                     ["max_machines"] = 3,
-                    ["max_uses"] = 50,
                     ["max_users"] = 2,
                     ["last_validated_at"] = "2026-01-02T03:04:05Z",
                     ["last_check_in_at"] = "2026-01-03T03:04:05Z",
@@ -413,13 +409,11 @@ public class PolicyReadTests
         Assert.NotNull(license.Expiry);
         Assert.False(license.Suspended);
         Assert.True(license.Protected);
-        Assert.Equal(7, license.Uses);
         Assert.Equal("ED25519_SIGN", license.Scheme);
         Assert.True(license.Encrypted);
         Assert.True(license.Strict);
         Assert.False(license.Floating);
         Assert.Equal(3, license.MaxMachines);
-        Assert.Equal(50, license.MaxUses);
         Assert.Equal(2, license.MaxUsers);
         Assert.NotNull(license.LastValidatedAt);
         Assert.NotNull(license.LastCheckInAt);

@@ -39,7 +39,6 @@ public class LicenseFileTests
                 {
                     ["key"] = key,
                     ["suspended"] = false,
-                    ["uses"] = 3,
                 },
             },
             // Format v2 puts the claims inside the signed bytes. A payload
@@ -78,7 +77,6 @@ public class LicenseFileTests
         var license = licenseFile.VerifyAndDecrypt(publicKey, licenseKey: "unused-for-plain-files");
         Assert.Equal(licenseId, license.Id);
         Assert.Equal("LIC-ABC-123", license.Key);
-        Assert.Equal(3, license.Uses);
     }
 
     [Fact]

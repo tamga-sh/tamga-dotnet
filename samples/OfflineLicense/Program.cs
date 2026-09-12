@@ -47,7 +47,7 @@ try
     Console.WriteLine($"Verified offline license file for license {license.Id}.");
     Console.WriteLine($"  Key: {license.Key}");
     Console.WriteLine($"  Suspended: {license.Suspended}");
-    Console.WriteLine($"  Uses: {license.Uses}");
+    Console.WriteLine($"  Max machines: {license.MaxMachines?.ToString() ?? "unlimited"}");
     return 0;
 }
 catch (TamgaApiException ex)
