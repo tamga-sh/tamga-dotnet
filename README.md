@@ -35,7 +35,7 @@ ValidationResult result = await client.ValidateByKeyAsync("YOUR-LICENSE-KEY");
 
 if (result.Code == ValidationCode.Valid)
 {
-    Console.WriteLine($"Valid. Uses: {result.License.Uses}.");
+    Console.WriteLine($"Valid. Machines: {result.License.MachinesCount}/{result.License.MaxMachines?.ToString() ?? "unlimited"}.");
 }
 else
 {
@@ -179,6 +179,53 @@ directions, and both directions silently drop rows.
 SDK whose response is built off a **read**, which is what makes
 `HeartbeatStatus.Dead` reachable from them — see [Known gaps](#known-gaps).
 
+### Entitlements and meters
+
+An entitlement's `Kind` is `Flag` (a boolean grant — the only kind that
+existed before the server's entitlement-metering migration) or `Meter` (a
+named, per-license counter). Only a **meter** carries a meaningful
+`MaxValue`/`CurrentValue`, and only on the license-scoped listing —
+`CurrentValue` is `null` on any other scope, never `0`:
+
+```csharp
+Page<Entitlement> entitlements = await client.ListEntitlementsAsync(licenseId);
+foreach (var e in entitlements.Items)
+{
+    if (e.Kind == EntitlementKind.Meter)
+    {
+        Console.WriteLine($"{e.Code}: {e.CurrentValue}/{e.MaxValue?.ToString() ?? "unlimited"}");
+    }
+}
+```
+
+Incrementing, decrementing and resetting a meter mirror the machine
+heartbeat pair (`PingHeartbeatAsync`/`ResetHeartbeatAsync`) exactly — one
+action route per verb, the full fresh resource returned so you see the new
+`CurrentValue` without a second round trip:
+
+```csharp
+try
+{
+    Entitlement e = await client.IncrementEntitlementUsageAsync(licenseId, entitlementId);
+    Console.WriteLine($"now at {e.CurrentValue}/{e.MaxValue}");
+}
+catch (MeterLimitExceededException ex)
+{
+    // ex.EntitlementId names which meter hit its cap, from meta.entitlement_id —
+    // useful when a license has several meters and you need to tell them apart
+    // without re-parsing the request that triggered this.
+    Console.WriteLine($"meter {ex.EntitlementId} is at its limit");
+}
+
+await client.DecrementEntitlementUsageAsync(licenseId, entitlementId, decrement: 3);
+await client.ResetEntitlementUsageAsync(licenseId, entitlementId);
+```
+
+All three require the entitlement to be **directly attached** to the
+license — one only inherited via the policy (no `license_entitlements` row)
+answers `404` on all three, because there is no counter to increment until
+it is attached directly.
+
 ## Auth transports
 
 `TamgaClientOptions.Auth` accepts any one of the eight transports below
@@ -229,7 +276,7 @@ byte[] accountPublicKey = Convert.FromBase64String(accountEd25519PublicKeyBase64
 try
 {
     License license = file.VerifyAndDecrypt(accountPublicKey, "YOUR-LICENSE-KEY");
-    Console.WriteLine($"Verified license {license.Id}, uses {license.Uses}.");
+    Console.WriteLine($"Verified license {license.Id}, suspended={license.Suspended}.");
 }
 catch (LicenseFileExpiredException ex)
 {
@@ -378,7 +425,7 @@ around:
   (`401 LICENSE_SUSPENDED`) and expired licenses under a `REVOKE_ACCESS` policy
   (`401 LICENSE_EXPIRED`) are refused at the same front door, before any
   per-endpoint check runs.
-- **19 of the 24 `ValidationCode` values are reachable.** `NotFound` is
+- **18 of the 23 `ValidationCode` values are reachable.** `NotFound` is
   modeled but never emitted (the server returns HTTP 404 directly instead),
   and `Banned`, `ComponentsScopeMismatch`, `ChecksumScopeMismatch` and
   `VersionScopeMismatch` exist for forward-compatibility only. `TooManyUsers`
@@ -386,6 +433,12 @@ around:
   `HeartbeatNotStarted` (a `Scope.Fingerprint` on a `require_heartbeat`
   policy) **are** reachable as of the API's audit patch, as are
   `EntitlementsMissing` and `FingerprintScopeMismatch` — see the next entry.
+  `TooManyUses` was **removed entirely** (not just unreachable) by the
+  entitlement-metering migration — the global per-license `uses`/`max_uses`
+  counter it reported on no longer exists on the wire, replaced by named
+  per-entitlement meters (`Kind`, `MaxValue`, `CurrentValue` — see
+  [Entitlements and meters](#entitlements-and-meters)) and the
+  `422 METER_LIMIT_EXCEEDED` error, mapped to `MeterLimitExceededException`.
 - **`Scope`: six fields enforced, two rejected.** `Product`, `Policy`, `User`,
   `Environment`, `Entitlements` and `Fingerprint` all constrain validation.
   `Entitlements` takes entitlement **codes** (not the UUIDs the attach/detach
