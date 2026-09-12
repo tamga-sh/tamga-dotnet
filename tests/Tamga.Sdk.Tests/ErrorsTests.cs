@@ -133,6 +133,50 @@ public class ErrorsTests
         Assert.Null(ex.ExistingMachineId);
     }
 
+    /// <summary>
+    /// The API attaches <c>meta: {"entitlement_id": "&lt;uuid&gt;"}</c> to a
+    /// <c>422 METER_LIMIT_EXCEEDED</c>, mirroring how <c>FINGERPRINT_TAKEN</c> attaches
+    /// <c>machineId</c>. Exercises the public single-argument constructor directly, not only
+    /// through <see cref="TamgaErrorMapper"/>.
+    /// </summary>
+    [Fact]
+    public void MeterLimitExceededException_ReadsTheEntitlementId_FromMeta()
+    {
+        var entitlementId = Guid.NewGuid();
+        var error = new TamgaApiError
+        {
+            Status = 422,
+            Code = "METER_LIMIT_EXCEEDED",
+            Detail = "This meter has reached its limit",
+            Meta = JsonSerializer.SerializeToElement(new { entitlement_id = entitlementId.ToString() }, TamgaJsonOptions.Default),
+        };
+
+        // Public constructor — usable directly, not only reachable via the error mapper.
+        var ex = new MeterLimitExceededException(error);
+
+        Assert.Equal(entitlementId, ex.EntitlementId);
+        Assert.Equal("METER_LIMIT_EXCEEDED", ex.Error.Code);
+        Assert.Null(ex.ErrorBodyParseFailure);
+    }
+
+    [Theory]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d"}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d","meta":null}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d","meta":{}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d","meta":{"entitlement_id":"not-a-uuid"}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d","meta":{"entitlement_id":42}}]}""")]
+    [InlineData("""{"errors":[{"id":"1","status":"422","code":"METER_LIMIT_EXCEEDED","title":"t","detail":"d","meta":"unexpected"}]}""")]
+    public void MeterLimitExceededException_EntitlementId_IsNull_WhenMetaIsAbsentOrMalformed(string json)
+    {
+        // Absent or malformed meta must degrade to "not named", never throw — the same posture as
+        // FingerprintTakenException.ExistingMachineId above.
+        var error = Assert.Single(JsonSerializer.Deserialize<TamgaApiErrorEnvelope>(json, TamgaJsonOptions.Default)!.Errors);
+
+        var ex = Assert.IsType<MeterLimitExceededException>(TamgaErrorMapper.ToException(error));
+
+        Assert.Null(ex.EntitlementId);
+    }
+
     [Fact]
     public void TamgaApiError_Meta_RoundTripsThroughTheSharedOptions()
     {
@@ -185,6 +229,7 @@ public class ErrorsTests
         yield return new object[] { "MEMORY_LIMIT_EXCEEDED", typeof(MemoryLimitExceededException) };
         yield return new object[] { "DISK_LIMIT_EXCEEDED", typeof(DiskLimitExceededException) };
         yield return new object[] { "TOO_MANY_PROCESSES", typeof(TooManyProcessesException) };
+        yield return new object[] { "METER_LIMIT_EXCEEDED", typeof(MeterLimitExceededException) };
         yield return new object[] { "LICENSE_SUSPENDED", typeof(LicenseSuspendedException) };
         yield return new object[] { "LICENSE_EXPIRED", typeof(LicenseExpiredException) };
         yield return new object[] { "LICENSE_NOT_ALLOWED", typeof(LicenseNotAllowedException) };

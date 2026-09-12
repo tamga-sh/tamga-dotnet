@@ -179,6 +179,34 @@ public class EntitlementTests
     }
 
     [Fact]
+    public async Task ListEntitlementsAsync_UnrecognizedKind_DecodesToUnknown_WithoutThrowing()
+    {
+        // kind is a brand-new field — a future server value must not hard-fail deserialization for
+        // an SDK consumer who hasn't upgraded yet, same forward-compat posture as ValidationCode.
+        var (client, handler) = MakeClient();
+        var resource = EntitlementResource(Guid.NewGuid(), "Requests", "requests");
+        resource["attributes"]!["kind"] = "some_future_kind_not_yet_modeled";
+        handler.Enqueue(HttpStatusCode.OK, ListBody(resource));
+
+        var page = await client.ListEntitlementsAsync(Guid.NewGuid());
+
+        Assert.Equal(EntitlementKind.Unknown, page.Items[0].Kind);
+    }
+
+    [Theory]
+    [InlineData(EntitlementKind.Flag, "flag")]
+    [InlineData(EntitlementKind.Meter, "meter")]
+    [InlineData(EntitlementKind.Unknown, "flag")] // never received from the wire as a real value; falls back to flag rather than writing a value this SDK cannot itself have decoded.
+    public void EntitlementAttributes_SerializesKind_AsLowercaseWireString(EntitlementKind kind, string expectedWireValue)
+    {
+        var attrs = new EntitlementAttributes { Name = "Requests", Code = "requests", Kind = kind };
+
+        var json = JsonSerializer.Serialize(attrs, TamgaJsonOptions.Default);
+
+        Assert.Contains($"\"kind\":\"{expectedWireValue}\"", json);
+    }
+
+    [Fact]
     public async Task ListEntitlementsAsync_LicenseScoped_SurfacesMaxValueAndCurrentValue()
     {
         // The license-scoped listing shape (§2.2 of the entitlement-metering migration): kind,
@@ -302,6 +330,25 @@ public class EntitlementTests
     }
 
     [Fact]
+    public async Task DecrementEntitlementUsageAsync_NoAmountGiven_SendsNoBody_AndReturnsFreshResource()
+    {
+        var (client, handler) = MakeClient();
+        var licenseId = Guid.NewGuid();
+        var entitlementId = Guid.NewGuid();
+        var resource = EntitlementResource(entitlementId, "API Requests", "requests");
+        resource["attributes"]!["kind"] = "meter";
+        resource["attributes"]!["current_value"] = 4;
+        handler.Enqueue(HttpStatusCode.OK, new JsonObject { ["data"] = resource }.ToJsonString());
+
+        var entitlement = await client.DecrementEntitlementUsageAsync(licenseId, entitlementId);
+
+        Assert.Equal(4, entitlement.CurrentValue);
+        Assert.Equal(HttpMethod.Post, handler.Requests[0].Request.Method);
+        Assert.Contains($"/licenses/{licenseId}/entitlements/{entitlementId}/actions/decrement", handler.Requests[0].Request.RequestUri!.AbsolutePath);
+        Assert.Null(handler.Requests[0].Body);
+    }
+
+    [Fact]
     public async Task ResetEntitlementUsageAsync_SendsNoBody_AndReturnsFreshResource()
     {
         var (client, handler) = MakeClient();
@@ -318,6 +365,47 @@ public class EntitlementTests
         Assert.Equal(HttpMethod.Post, handler.Requests[0].Request.Method);
         Assert.Contains($"/licenses/{licenseId}/entitlements/{entitlementId}/actions/reset", handler.Requests[0].Request.RequestUri!.AbsolutePath);
         Assert.Null(handler.Requests[0].Body);
+    }
+
+    // A 2xx whose body has no `data` resource is a server/proxy fault, not a caller mistake — it
+    // must surface as a typed, dispatchable MISSING_DATA error rather than a NullReferenceException
+    // from inside the mapper, mirroring how ComponentProcessTests covers the same failure mode for
+    // /components and /processes.
+
+    [Fact]
+    public async Task IncrementEntitlementUsageAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.IncrementEntitlementUsageAsync(Guid.NewGuid(), Guid.NewGuid()));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task DecrementEntitlementUsageAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.DecrementEntitlementUsageAsync(Guid.NewGuid(), Guid.NewGuid()));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
+    }
+
+    [Fact]
+    public async Task ResetEntitlementUsageAsync_ReportsMissingData_WhenTheDocumentHasNoResource()
+    {
+        var (client, handler) = MakeClient();
+        handler.Enqueue(HttpStatusCode.OK, """{"meta":{}}""");
+
+        var ex = await Assert.ThrowsAsync<TamgaApiException>(() =>
+            client.ResetEntitlementUsageAsync(Guid.NewGuid(), Guid.NewGuid()));
+
+        Assert.Equal("MISSING_DATA", ex.Error.Code);
     }
 
     [Fact]
