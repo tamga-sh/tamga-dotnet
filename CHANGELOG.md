@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.3](https://github.com/tamga-sh/tamga-dotnet/compare/v2.1.2...v2.1.3) (2026-09-12)
+
+
+### Bug Fixes
+
+* replace the global uses/max_uses counter with per-entitlement meters ([#43](https://github.com/tamga-sh/tamga-dotnet/issues/43)) ([02b730a](https://github.com/tamga-sh/tamga-dotnet/commit/02b730a4fe7cab80f0867b65406057b96e5e63f4))
+
 ## [2.1.2](https://github.com/tamga-sh/tamga-dotnet/compare/v2.1.1...v2.1.2) (2026-09-05)
 
 
