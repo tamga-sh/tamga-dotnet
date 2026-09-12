@@ -43,7 +43,10 @@ try
         // Always display/match by Code (the stable, developer-facing identifier) — Name is
         // just a display label and can change without notice.
         var source = entitlement.Inherited == true ? "inherited from policy" : "attached directly";
-        Console.WriteLine($"  - {entitlement.Name} (code: {entitlement.Code}, {source})");
+        var usage = entitlement.CurrentValue is int currentValue
+            ? $", {currentValue}/{entitlement.MaxValue?.ToString() ?? "unlimited"}"
+            : "";
+        Console.WriteLine($"  - {entitlement.Name} (code: {entitlement.Code}, kind: {entitlement.Kind}, {source}{usage})");
     }
 
     if (page.Items.Count == 100)

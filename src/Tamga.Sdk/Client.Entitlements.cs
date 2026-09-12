@@ -121,4 +121,85 @@ public sealed partial class TamgaClient
 
         return all;
     }
+
+    // ---------------------------------------------------------------
+    // §J.2 Meter actions — increment/decrement/reset a per-license entitlement counter.
+    //
+    // Mirrors the machine heartbeat pair exactly (Client.Machines.cs PingHeartbeatAsync/
+    // ResetHeartbeatAsync): one action route per verb, no body for reset, an optional body for
+    // increment/decrement, the full resource returned so the caller sees the fresh value without
+    // a second round trip.
+    //
+    // GOTCHA: like /components and /processes (Client.ComponentsProcesses.cs), the increment/
+    // decrement REQUEST bodies are flat — {"increment": 3} / {"decrement": 3} at the root, not
+    // JSON:API-enveloped — while the RESPONSE is an ordinary JSON:API document. That is why these
+    // two go through SendRawAsync + ParseResourceDocument rather than SendJsonApiAsync, exactly
+    // like the components/processes creates.
+    //
+    // GOTCHA: all three require the entitlement to be DIRECTLY attached to this license. An
+    // entitlement only inherited via the policy (no license_entitlements row) 404s on all three —
+    // attach it directly first to start tracking.
+    // ---------------------------------------------------------------
+
+    /// <summary>
+    /// <c>POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/increment</c> —
+    /// increments a meter's <c>current_value</c>. Returns the full, fresh <see cref="Entitlement"/>
+    /// resource.
+    /// </summary>
+    /// <param name="licenseId">The license the entitlement is directly attached to.</param>
+    /// <param name="entitlementId">The entitlement (meter) to increment.</param>
+    /// <param name="increment">The amount to increment by, or <see langword="null"/> to send no body and let the server default to <c>1</c>. A value below <c>1</c> is not rejected — the server clamps it up to <c>1</c>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <exception cref="TamgaNotFoundException"><c>404</c> — the entitlement is not directly attached to this license (only inherited via the policy, or does not exist).</exception>
+    /// <exception cref="MeterLimitExceededException"><c>422 METER_LIMIT_EXCEEDED</c> — <c>current_value + increment</c> would exceed the meter's effective <c>max_value</c>. <see cref="MeterLimitExceededException.EntitlementId"/> names which one.</exception>
+    public async Task<Entitlement> IncrementEntitlementUsageAsync(
+        Guid licenseId, Guid entitlementId, int? increment = null, CancellationToken cancellationToken = default)
+    {
+        var request = increment is null ? null : new IncrementEntitlementUsageRequest { Increment = increment };
+        var (body, response) = await _transport.SendRawAsync(
+            HttpMethod.Post, $"/licenses/{licenseId}/entitlements/{entitlementId}/actions/increment",
+            jsonBody: request, jsonApiContentType: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+        response.Dispose();
+        var doc = ParseResourceDocument<EntitlementAttributes>(body, "Increment entitlement usage returned an empty body.");
+        return Entitlement.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary>
+    /// <c>POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/decrement</c> —
+    /// decrements a meter's <c>current_value</c> (floored at <c>0</c>, never negative). Returns the
+    /// full, fresh <see cref="Entitlement"/> resource.
+    /// </summary>
+    /// <param name="licenseId">The license the entitlement is directly attached to.</param>
+    /// <param name="entitlementId">The entitlement (meter) to decrement.</param>
+    /// <param name="decrement">The amount to decrement by, or <see langword="null"/> to send no body and let the server default to <c>1</c>. A value below <c>1</c> is not rejected — the server clamps it up to <c>1</c>.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <exception cref="TamgaNotFoundException"><c>404</c> — the entitlement is not directly attached to this license (only inherited via the policy, or does not exist).</exception>
+    public async Task<Entitlement> DecrementEntitlementUsageAsync(
+        Guid licenseId, Guid entitlementId, int? decrement = null, CancellationToken cancellationToken = default)
+    {
+        var request = decrement is null ? null : new DecrementEntitlementUsageRequest { Decrement = decrement };
+        var (body, response) = await _transport.SendRawAsync(
+            HttpMethod.Post, $"/licenses/{licenseId}/entitlements/{entitlementId}/actions/decrement",
+            jsonBody: request, jsonApiContentType: false, cancellationToken: cancellationToken).ConfigureAwait(false);
+        response.Dispose();
+        var doc = ParseResourceDocument<EntitlementAttributes>(body, "Decrement entitlement usage returned an empty body.");
+        return Entitlement.FromResource(doc.Data ?? throw MissingDataError());
+    }
+
+    /// <summary>
+    /// <c>POST /licenses/{license_id}/entitlements/{entitlement_id}/actions/reset</c> — no body,
+    /// rewinds a meter's <c>current_value</c> to <c>0</c>. Returns the full, fresh
+    /// <see cref="Entitlement"/> resource.
+    /// </summary>
+    /// <param name="licenseId">The license the entitlement is directly attached to.</param>
+    /// <param name="entitlementId">The entitlement (meter) to reset.</param>
+    /// <param name="cancellationToken">Cancels the request.</param>
+    /// <exception cref="TamgaNotFoundException"><c>404</c> — the entitlement is not directly attached to this license (only inherited via the policy, or does not exist).</exception>
+    public async Task<Entitlement> ResetEntitlementUsageAsync(
+        Guid licenseId, Guid entitlementId, CancellationToken cancellationToken = default)
+    {
+        var doc = await _transport.SendJsonApiAsync<EntitlementAttributes>(
+            HttpMethod.Post, $"/licenses/{licenseId}/entitlements/{entitlementId}/actions/reset", cancellationToken: cancellationToken).ConfigureAwait(false);
+        return Entitlement.FromResource(doc.Data ?? throw MissingDataError());
+    }
 }

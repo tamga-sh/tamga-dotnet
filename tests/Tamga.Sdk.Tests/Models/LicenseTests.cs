@@ -57,7 +57,7 @@ public class LicenseTests
     }
 
     /// <summary>
-    /// The server's license serializer emits 21 attributes; this SDK used to bind 7 of them, so
+    /// The server's license serializer emits 19 attributes; this SDK used to bind 7 of them, so
     /// `status`, `machines_count` and `max_machines` — the three a licensing client most needs —
     /// were silently dropped on the floor.
     /// </summary>
@@ -75,13 +75,11 @@ public class LicenseTests
                 "expiry": "2030-01-01T00:00:00Z",
                 "suspended": false,
                 "protected": true,
-                "uses": 7,
                 "scheme": "ED25519_SIGN",
                 "encrypted": true,
                 "strict": true,
                 "floating": false,
                 "max_machines": 5,
-                "max_uses": 100,
                 "max_users": 3,
                 "last_validated_at": "2026-08-01T00:00:00Z",
                 "last_check_in_at": "2026-08-02T00:00:00Z",
@@ -102,13 +100,11 @@ public class LicenseTests
         Assert.Equal("EXPIRING", license.Status);
         Assert.False(license.Suspended);
         Assert.True(license.Protected);
-        Assert.Equal(7, license.Uses);
         Assert.Equal("ED25519_SIGN", license.Scheme);
         Assert.True(license.Encrypted);
         Assert.True(license.Strict);
         Assert.False(license.Floating);
         Assert.Equal(5, license.MaxMachines);
-        Assert.Equal(100, license.MaxUses);
         Assert.Equal(3, license.MaxUsers);
         Assert.Equal(4, license.MachinesCount);
         Assert.NotNull(license.LastCheckOutAt);
@@ -165,7 +161,7 @@ public class LicenseTests
         {
             Type = "licenses",
             Id = licenseId,
-            Attributes = new LicenseAttributes { Key = "LIC-1", Suspended = true, Uses = 5 },
+            Attributes = new LicenseAttributes { Key = "LIC-1", Suspended = true },
             // Hand-built, since no server response can contain this.
             Relationships = new Dictionary<string, JsonApiRelationship>
             {
@@ -178,6 +174,5 @@ public class LicenseTests
         Assert.Equal(licenseId, license.Id);
         Assert.Equal("LIC-1", license.Key);
         Assert.True(license.Suspended);
-        Assert.Equal(5, license.Uses);
     }
 }

@@ -21,7 +21,6 @@ public class ValidationCodeTests
         yield return new object[] { "TOO_MUCH_MEMORY", ValidationCode.TooMuchMemory };
         yield return new object[] { "TOO_MUCH_DISK", ValidationCode.TooMuchDisk };
         yield return new object[] { "TOO_MANY_PROCESSES", ValidationCode.TooManyProcesses };
-        yield return new object[] { "TOO_MANY_USES", ValidationCode.TooManyUses };
         yield return new object[] { "NOT_FOUND", ValidationCode.NotFound };
         yield return new object[] { "BANNED", ValidationCode.Banned };
         yield return new object[] { "ENTITLEMENTS_MISSING", ValidationCode.EntitlementsMissing };
@@ -61,8 +60,8 @@ public class ValidationCodeTests
     }
 
     [Fact]
-    public void AllTwentyFourKnownValuesAreModeled()
+    public void AllTwentyThreeKnownValuesAreModeled()
     {
-        Assert.Equal(24, AllKnownWireValues().Count());
+        Assert.Equal(23, AllKnownWireValues().Count());
     }
 }

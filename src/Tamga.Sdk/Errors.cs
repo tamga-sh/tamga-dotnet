@@ -680,6 +680,48 @@ public sealed class TooManyProcessesException : TamgaLimitExceededException
 }
 
 /// <summary>
+/// <c>422 METER_LIMIT_EXCEEDED</c> — <see cref="TamgaClient.IncrementEntitlementUsageAsync"/>
+/// refused: <c>current_value + increment</c> would exceed the meter's effective <c>max_value</c>.
+/// Replaces the retired <c>TOO_MANY_USES</c> validation code from the global per-license use
+/// counter — there is no validate-time equivalent here, since meters are checked only at the
+/// point of increment, never by <c>validate</c>.
+/// </summary>
+/// <remarks>
+/// Not a <see cref="TamgaLimitExceededException"/>: that hierarchy exists specifically to
+/// normalize a creation-time quota rejection onto the <see cref="ValidationCode"/> a later
+/// <c>validate</c> call would report for the same overage (machines/cores/memory/disk/processes).
+/// A meter has no such dual create-time/validate-time path — incrementing is the only place the
+/// cap is enforced — so this mirrors <see cref="FingerprintTakenException"/> instead: a plain
+/// <see cref="TamgaApiException"/> that reads one extra field out of <c>meta</c>.
+/// </remarks>
+public sealed class MeterLimitExceededException : TamgaApiException
+{
+    /// <summary>Constructs from a parsed API error.</summary>
+    public MeterLimitExceededException(TamgaApiError error) : base(error)
+        => EntitlementId = ReadEntitlementId(error);
+
+    internal MeterLimitExceededException(TamgaApiError error, Exception? errorBodyParseFailure) : base(error, errorBodyParseFailure)
+        => EntitlementId = ReadEntitlementId(error);
+
+    /// <summary>
+    /// The id of the meter entitlement that would have exceeded its cap, read from
+    /// <c>meta.entitlement_id</c> — present so a caller juggling several meters on one license can
+    /// tell which one hit its cap without re-parsing the request. <see langword="null"/> only if
+    /// the server sent no <c>meta</c>, or one that did not hold a UUID string under
+    /// <c>entitlement_id</c>.
+    /// </summary>
+    public Guid? EntitlementId { get; }
+
+    private static Guid? ReadEntitlementId(TamgaApiError error) =>
+        error.Meta is { ValueKind: JsonValueKind.Object } meta
+        && meta.TryGetProperty("entitlement_id", out var id)
+        && id.ValueKind == JsonValueKind.String
+        && Guid.TryParse(id.GetString(), out var entitlementId)
+            ? entitlementId
+            : null;
+}
+
+/// <summary>
 /// Thrown by <see cref="TamgaClient.ActivateMachineAsync"/> when the create succeeded, license
 /// validation then answered an over-limit code, and — because <c>deleteOnOverLimit</c> was
 /// <see langword="true"/> — the machine was deleted again. Built client-side; no server error
@@ -865,6 +907,7 @@ public static class TamgaErrorMapper
         "MEMORY_LIMIT_EXCEEDED" => new MemoryLimitExceededException(error, errorBodyParseFailure),
         "DISK_LIMIT_EXCEEDED" => new DiskLimitExceededException(error, errorBodyParseFailure),
         "TOO_MANY_PROCESSES" => new TooManyProcessesException(error, errorBodyParseFailure),
+        "METER_LIMIT_EXCEEDED" => new MeterLimitExceededException(error, errorBodyParseFailure),
         "LICENSE_SUSPENDED" => new LicenseSuspendedException(error, errorBodyParseFailure),
         "LICENSE_EXPIRED" => new LicenseExpiredException(error, errorBodyParseFailure),
         "LICENSE_NOT_ALLOWED" => new LicenseNotAllowedException(error, errorBodyParseFailure),

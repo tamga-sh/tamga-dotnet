@@ -30,12 +30,12 @@ try
 {
     var result = await client.ValidateByKeyAsync(licenseKey);
 
-    // 16 of ValidationCode's 24 values are reachable today — see the README's "Known gaps"
+    // 18 of ValidationCode's 23 values are reachable today — see the README's "Known gaps"
     // section before building UX around the rest.
     switch (result.Code)
     {
         case ValidationCode.Valid:
-            Console.WriteLine($"License is valid. Uses: {result.License.Uses}, expiry: {result.License.Expiry?.ToString() ?? "never"}.");
+            Console.WriteLine($"License is valid. Expiry: {result.License.Expiry?.ToString() ?? "never"}.");
             break;
         case ValidationCode.Suspended:
             Console.WriteLine("License is suspended.");
